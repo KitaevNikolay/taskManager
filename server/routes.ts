@@ -261,12 +261,58 @@ api.patch('/tasks/:id/dates', async (req, res) => {
   await done(res, id);
 });
 
-// Связь «окончание → начало» (linkType 2): successor зависит от predecessor
+// ---------- Связи задач ----------
+// Используем «Предыдущие задачи» Б24 (поле DEPENDS_ON): их видно в карточке задачи, они пишутся в историю
+// и читаются через task.item.getdependson. Связи диаграммы Ганта Б24 (task.dependence.add) через REST
+// прочитать нельзя — поэтому их не используем.
+
+const readPredecessors = async (id: number) =>
+  ((await callResult<string[]>('task.item.getdependson', { TASKID: id })) || []).map(Number);
+
+const sameSet = (a: number[], b: number[]) => a.length === b.length && a.every((x) => b.includes(x));
+
+/** Записать список предшественников и убедиться, что Б24 его сохранил */
+async function writePredecessors(id: number, ids: number[]) {
+  const value = ids.length ? ids : '';
+  const attempts: [string, Record<string, unknown>][] = [
+    ['tasks.task.update', { taskId: id, fields: { DEPENDS_ON: value } }],
+    ['task.item.update', { TASKID: id, TASKDATA: { DEPENDS_ON: value } }], // старый метод — на случай, если новый поле проигнорирует
+  ];
+  for (const [method, params] of attempts) {
+    await callResult(method, params);
+    if (sameSet(await readPredecessors(id), ids)) return;
+  }
+  throw new HttpError(502, 'Битрикс24 не сохранил связь задач — проверьте права вебхука на задачу');
+}
+
+/** Не даём создать цикл: pred не должна (транзитивно) зависеть от id */
+function createsCycle(id: number, pred: number) {
+  const seen = new Set<number>();
+  const stack = [pred];
+  while (stack.length) {
+    const cur = stack.pop()!;
+    if (cur === id) return true;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    const row = q.get<{ depends_on: string }>('SELECT depends_on FROM tasks WHERE id = ?', cur);
+    stack.push(...(JSON.parse(row?.depends_on || '[]') as number[]));
+  }
+  return false;
+}
+
+async function addPredecessor(id: number, pred: number) {
+  if (pred === id) throw new HttpError(400, 'Задача не может зависеть от самой себя');
+  if (createsCycle(id, pred)) throw new HttpError(400, `Получится цикл: #${pred} уже зависит от #${id}`);
+  const cur = await readPredecessors(id);
+  if (cur.includes(pred)) return;
+  await writePredecessors(id, [...cur, pred]);
+}
+
+// Связь «окончание → начало»: задача id начинается после pred
 api.post('/tasks/:id/deps', async (req, res) => {
   const id = int(req.params.id);
   const pred = int(req.body?.predecessorId, 'predecessorId');
-  if (pred === id) throw new HttpError(400, 'Задача не может зависеть от самой себя');
-  await callResult('task.dependence.add', { taskIdFrom: pred, taskIdTo: id, linkType: Number(req.body?.linkType ?? 2) });
+  await addPredecessor(id, pred);
   await refreshTask(pred).catch(() => null);
   await done(res, id);
 });
@@ -274,7 +320,8 @@ api.post('/tasks/:id/deps', async (req, res) => {
 api.delete('/tasks/:id/deps/:pred', async (req, res) => {
   const id = int(req.params.id);
   const pred = int(req.params.pred, 'predecessorId');
-  await callResult('task.dependence.delete', { taskIdFrom: pred, taskIdTo: id });
+  const cur = await readPredecessors(id);
+  if (cur.includes(pred)) await writePredecessors(id, cur.filter((x) => x !== pred));
   await refreshTask(pred).catch(() => null);
   await done(res, id);
 });
@@ -356,10 +403,8 @@ api.post('/queues/:empId/plan', async (req, res) => {
   }
   if (req.body?.link) {
     for (let i = 1; i < plan.length; i++) {
-      const succ = q.get<any>('SELECT depends_on FROM tasks WHERE id = ?', plan[i].taskId);
-      if (JSON.parse(succ?.depends_on || '[]').includes(plan[i - 1].taskId)) continue;
       try {
-        await callResult('task.dependence.add', { taskIdFrom: plan[i - 1].taskId, taskIdTo: plan[i].taskId, linkType: 2 });
+        await addPredecessor(plan[i].taskId, plan[i - 1].taskId);
       } catch (e: any) {
         errors.push(`Связь #${plan[i - 1].taskId}→#${plan[i].taskId}: ${e.message}`);
       }
