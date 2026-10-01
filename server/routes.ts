@@ -254,8 +254,18 @@ api.patch('/tasks/:id/dates', async (req, res) => {
   const st = toB24(b.startDatePlan, 'start');
   const en = toB24(b.endDatePlan, 'end');
   if (dl !== undefined) fields.DEADLINE = dl;
-  if (st !== undefined) fields.START_DATE_PLAN = st;
-  if (en !== undefined) fields.END_DATE_PLAN = en;
+  if (st !== undefined || en !== undefined) {
+    // Б24 при обновлении одной плановой даты стирает вторую — всегда отправляем пару, недостающую берём из задачи
+    let start = st, end = en;
+    if (start === undefined || end === undefined) {
+      const cur = (await callResult<any>('tasks.task.get', { taskId: id, select: ['ID', 'START_DATE_PLAN', 'END_DATE_PLAN'] })).task;
+      start ??= cur?.startDatePlan || '';
+      end ??= cur?.endDatePlan || '';
+    }
+    if (start && end && Date.parse(start) > Date.parse(end)) throw new HttpError(400, 'План: дата начала позже даты окончания');
+    fields.START_DATE_PLAN = start!;
+    fields.END_DATE_PLAN = end!;
+  }
   if (!Object.keys(fields).length) throw new HttpError(400, 'Нет полей для обновления');
   await callResult('tasks.task.update', { taskId: id, fields });
   await done(res, id);
