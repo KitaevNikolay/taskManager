@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { q, getSettings, saveSettings } from './db.ts';
 import { call, callResult, BitrixError, GROUP_ID, PORTAL_URL } from './bitrix.ts';
-import { runSync, refreshTask, publicSyncState, syncState, STATUS_NAMES } from './sync.ts';
+import { runSync, refreshTask, forgetTask, publicSyncState, syncState, STATUS_NAMES } from './sync.ts';
 import { runRules } from './alerts.ts';
 import { bus } from './bus.ts';
 import { absencesApi, absenceInfo, dayoffStats } from './absences.ts';
@@ -189,7 +189,11 @@ api.get('/tasks/:id', async (req, res) => {
   const id = int(req.params.id);
   let live: any = null;
   try {
-    live = (await callResult<any>('tasks.task.get', { taskId: id, select: ['ID', 'DESCRIPTION', 'TAGS', 'ACCOMPLICES', 'AUDITORS'] })).task;
+    live = (await callResult<any>('tasks.task.get', { taskId: id, select: ['ID', 'DESCRIPTION', 'TAGS', 'ACCOMPLICES', 'AUDITORS'] }))?.task;
+    if (!live) {
+      forgetTask(id);
+      throw new HttpError(404, 'Задача удалена в Битрикс24');
+    }
   } catch (e) {
     if (!(e instanceof BitrixError)) throw e;
   }
@@ -198,7 +202,7 @@ api.get('/tasks/:id', async (req, res) => {
   const deps = q.all('SELECT id, title, status, start_date_plan, end_date_plan, deadline FROM tasks WHERE id IN (SELECT value FROM json_each(?))', JSON.stringify(task.depends_on));
   const successors = q.all("SELECT id, title, status FROM tasks WHERE EXISTS (SELECT 1 FROM json_each(tasks.depends_on) WHERE value = ?)", id);
   const alerts = q.all('SELECT * FROM alerts WHERE task_id = ? ORDER BY id DESC LIMIT 30', id);
-  res.json({ ...task, description: live?.description ?? null, accomplicesData: live?.accomplicesData, auditorsData: live?.auditorsData, tags: live?.tags, predecessors: deps, successors, alerts, url: taskUrl(task) });
+  res.json({ ...task, description: live?.description ?? null, accomplicesData: live?.accomplicesData, auditorsData: live?.auditorsData, tags: live?.tags ?? task.tags, predecessors: deps, successors, alerts, url: taskUrl(task) });
 });
 
 const taskUrl = (t: any) => `${PORTAL_URL}/company/personal/user/${t.responsible_id || 0}/tasks/task/view/${t.id}/`;
@@ -206,6 +210,7 @@ const taskUrl = (t: any) => `${PORTAL_URL}/company/personal/user/${t.responsible
 async function done(res: Response, id: number) {
   q.run('UPDATE alerts SET read_at = ? WHERE task_id = ? AND read_at IS NULL AND type IN (?, ?)', new Date().toISOString(), id, 'overdue', 'deadline_soon');
   const t = await refreshTask(id);
+  if (!t) throw new HttpError(404, 'Задача удалена в Битрикс24');
   runRules();
   res.json(parseTask(q.get(`SELECT ${TASK_COLS} FROM tasks t WHERE t.id = ?`, (t as any).id)));
 }

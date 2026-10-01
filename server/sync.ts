@@ -289,8 +289,19 @@ export const publicSyncState = () => ({
 });
 
 /** Перечитать одну задачу после записи в Б24 (без алертов о собственных действиях) */
+/** Задача удалена в Б24 (tasks.task.get вернул пустой результат без ошибки) — убираем её из локальной базы */
+export function forgetTask(id: number) {
+  q.run('DELETE FROM tasks WHERE id = ?', id);
+  q.run('DELETE FROM queue WHERE task_id = ?', id);
+  emit({ type: 'tasks', ids: [id] });
+}
+
 export async function refreshTask(id: number) {
-  const r = await callResult<{ task: B24Task }>('tasks.task.get', { taskId: id, select: TASK_SELECT });
+  const r = await callResult<{ task?: B24Task }>('tasks.task.get', { taskId: id, select: TASK_SELECT });
+  if (!r?.task) {
+    forgetTask(id);
+    return undefined;
+  }
   // Сбрасываем даты, чтобы processTasks точно перечитал историю и зависимости
   q.run("UPDATE tasks SET changed_date = '' WHERE id = ?", id);
   await processTasks([r.task], { alerts: false });
