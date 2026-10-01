@@ -1,0 +1,19 @@
+# systemd-сервис для запуска без Docker.
+# Скопируйте в /etc/systemd/system/task-manager.service, поправьте User и WorkingDirectory, затем:
+#   systemctl daemon-reload && systemctl enable --now task-manager
+[Unit]
+Description=Задачи отдела (Битрикс24)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=taskmanager
+WorkingDirectory=/opt/taskManager
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

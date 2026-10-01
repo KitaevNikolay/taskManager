@@ -9,7 +9,15 @@ import { startSyncLoop } from './sync.ts';
 
 const PORT = Number(process.env.PORT || 3001);
 
+const HOST = process.env.HOST || '0.0.0.0';
+
 const app = express();
+// За reverse-proxy (nginx): реальный IP клиента и https берутся из X-Forwarded-*.
+// Без этого защита от перебора паролей считает всех пользователей одним IP прокси.
+if (process.env.TRUST_PROXY) {
+  const v = process.env.TRUST_PROXY;
+  app.set('trust proxy', v === 'true' ? true : /^\d+$/.test(v) ? Number(v) : v);
+}
 app.use(express.json({ limit: '1mb' }));
 
 // ---------- Авторизация: вход, восстановление пароля — без сессии; остальное API — только после входа ----------
@@ -34,10 +42,14 @@ if (fs.existsSync(clientDir)) {
   app.use((req, res, next) => (req.method === 'GET' ? res.sendFile(path.join(clientDir, 'index.html')) : next()));
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, HOST, () => {
   const users = q.get<{ n: number }>('SELECT COUNT(*) AS n FROM users')!.n;
-  console.log(`Сервер: http://localhost:${PORT}`);
-  if (!users) console.log('Пользователей нет — откройте сайт и создайте первого пользователя.');
+  console.log(`Сервер: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}${HOST === '0.0.0.0' ? ' (на всех интерфейсах)' : ''}`);
+  if (!users) {
+    console.log(process.env.WEB_SETUP === 'false'
+      ? 'Пользователей нет — создайте первого: npm run create-user -- <логин> [почта]'
+      : 'Пользователей нет — откройте сайт и создайте первого пользователя.');
+  }
   if (!mailConfigured()) console.log('SMTP не настроен — восстановление пароля: npm run reset-password -- <логин>');
   startSyncLoop();
 });

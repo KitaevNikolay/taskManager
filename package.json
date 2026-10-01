@@ -10,7 +10,9 @@
     "build": "vite build",
     "start": "tsx --env-file=.env server/index.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "reset-password": "tsx --env-file=.env server/reset-password.ts"
+    "reset-password": "tsx --env-file=.env server/reset-password.ts",
+    "backup": "tsx --env-file=.env server/backup.ts",
+    "create-user": "tsx --env-file=.env server/create-user.ts"
   },
   "dependencies": {
     "express": "^5.1.0",

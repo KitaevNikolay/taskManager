@@ -9,6 +9,8 @@ export interface User { id: number; login: string; email: string | null; name: s
 const SESSION_DAYS = 30;
 const RESET_MINUTES = 60;
 const MIN_PASSWORD = 8;
+/** WEB_SETUP=false — первый пользователь создаётся только командой npm run create-user (для сервера в интернете) */
+const WEB_SETUP = process.env.WEB_SETUP !== 'false';
 const APP_URL = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, '');
 
 class AuthError extends Error {
@@ -139,12 +141,14 @@ const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 export const authApi = Router();
 
 authApi.get('/auth/status', (req, res) => {
-  res.json({ user: currentUser(req), needsSetup: usersCount() === 0, mailConfigured: mailConfigured() });
+  const noUsers = usersCount() === 0;
+  res.json({ user: currentUser(req), needsSetup: noUsers && WEB_SETUP, noUsers, mailConfigured: mailConfigured() });
 });
 
 /** Первый запуск: создание первого пользователя (только пока пользователей нет) */
 authApi.post('/auth/setup', (req, res) => {
   if (usersCount() > 0) throw new AuthError(403, 'Первый пользователь уже создан');
+  if (!WEB_SETUP) throw new AuthError(403, 'Создание пользователя через сайт отключено. Используйте npm run create-user на сервере.');
   const b = req.body || {};
   const login = String(b.login || '').trim();
   if (!/^[\w.@-]{3,50}$/.test(login)) throw new AuthError(400, 'Логин: 3–50 символов, латиница, цифры, . _ @ -');

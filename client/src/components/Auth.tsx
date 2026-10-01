@@ -4,6 +4,7 @@ import { api } from '../api';
 export interface AuthStatus {
   user: { id: number; login: string; name: string | null; email: string | null } | null;
   needsSetup: boolean;
+  noUsers?: boolean;
   mailConfigured: boolean;
 }
 
@@ -68,6 +69,11 @@ export function LoginScreen({ status, onDone }: { status: AuthStatus; onDone: ()
           <span>Пароль</span>
           <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
         </label>
+      )}
+      {status.noUsers && (
+        <div className="form-hint">
+          Пользователей ещё нет. Создайте первого на сервере: <code>npm run create-user -- логин почта</code> — команда выдаст ссылку для установки пароля.
+        </div>
       )}
       {mode === 'forgot' && !status.mailConfigured && (
         <div className="form-hint">
