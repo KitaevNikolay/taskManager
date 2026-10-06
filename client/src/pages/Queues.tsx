@@ -10,19 +10,42 @@ import { useApp } from '../App';
 import { Avatar, TaskCard } from '../components/TaskCard';
 import { TaskBoard } from './Kanban';
 import { AbsenceBadge } from '../components/AbsenceBadge';
+import { DistributeView, LoadView } from './QueuesLoad';
 
-interface Queue { employee: Employee; tasks: Task[] }
+export interface Queue { employee: Employee; tasks: Task[] }
 
 const COL = 'col:';
 const DROP = 'drop:';
 const readEmployeeFromHash = () => Number(new URLSearchParams(window.location.hash.split('?')[1] || '').get('employee')) || null;
 
+type Mode = 'load' | 'distribute' | 'columns';
+const MODES: { id: Mode; label: string; hint: string }[] = [
+  { id: 'load', label: 'Нагрузка', hint: 'Строка на сотрудника: загрузка, текущая задача, проблемы' },
+  { id: 'distribute', label: 'Распределение', hint: 'Раздать задачи из буфера или без исполнителя' },
+  { id: 'columns', label: 'Колонки', hint: 'Очередь каждого сотрудника колонкой' },
+];
+const savedMode = (): Mode => {
+  try {
+    const m = localStorage.getItem('queues-mode');
+    return m === 'distribute' || m === 'columns' ? m : 'load';
+  } catch {
+    return 'load';
+  }
+};
+
 export function QueuesPage() {
-  const { employees, meta } = useApp();
+  const { employees, meta, version, toast } = useApp();
   const [selected, setSelected] = useState<number | null>(readEmployeeFromHash);
   const [groupId, setGroupId] = useState<number | null>(null);
+  const [mode, setModeState] = useState<Mode>(savedMode);
+  const [queues, setQueues] = useState<Queue[] | null>(null);
+  const [norm, setNorm] = useState(8);
   const boardGroup = groupId ?? meta?.departments[0]?.group_id ?? null;
 
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    try { localStorage.setItem('queues-mode', m); } catch { /* не запомним — не страшно */ }
+  };
   const select = (id: number | null) => {
     setSelected(id);
     window.history.replaceState(null, '', id ? `#/queues?employee=${id}` : '#/queues');
@@ -33,22 +56,20 @@ export function QueuesPage() {
     return () => window.removeEventListener('hashchange', h);
   }, []);
 
+  const load = () => api.get<Queue[]>('/queues').then(setQueues).catch((e) => toast(e.message, 'error'));
+  useEffect(() => void load(), [version]); // eslint-disable-line
+  useEffect(() => void api.get<{ loadNorm: number }>('/settings').then((s) => setNorm(s.loadNorm || 8)), []);
+
   const emp = employees.find((e) => e.id === selected);
-  return (
-    <div className="page page-wide">
-      <div className="emp-tabs">
-        <button className={selected === null ? 'active' : ''} onClick={() => select(null)}>Все очереди</button>
-        {employees.map((e) => (
-          <button key={e.id} className={selected === e.id ? 'active' : ''} onClick={() => select(e.id)} title={e.position || ''}>
-            <Avatar name={e.name} icon={e.photo} size={20} />
-            {e.name}
-            {!!e.is_buffer && <span className="chip warn buffer-chip">буфер</span>}
-            <AbsenceBadge employee={e} compact />
-            <span className="muted">{e.open_count ?? 0}</span>
-          </button>
-        ))}
-      </div>
-      {emp ? (
+  if (emp) {
+    return (
+      <div className="page page-wide">
+        <div className="row queue-back">
+          <button className="btn ghost sm" onClick={() => select(null)}>← Все очереди</button>
+          <select value={emp.id} onChange={(e) => select(Number(e.target.value))}>
+            {employees.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        </div>
         <TaskBoard
           employeeId={emp.id}
           groupId={boardGroup}
@@ -56,8 +77,34 @@ export function QueuesPage() {
           onSelectEmployee={select}
           title={<>Задачи: {emp.name}{!!emp.is_buffer && <span className="chip warn buffer-chip">буфер</span>} <AbsenceBadge employee={emp} /></>}
         />
+      </div>
+    );
+  }
+
+  return (
+    <div className="page page-wide">
+      <div className="page-head">
+        <h1>Очереди</h1>
+        <div className="seg seg-modes">
+          {MODES.map((m) => <button key={m.id} className={mode === m.id ? 'active' : ''} title={m.hint} onClick={() => setMode(m.id)}>{m.label}</button>)}
+        </div>
+        <div className="toolbar">
+          <select value="" onChange={(e) => e.target.value && select(Number(e.target.value))} title="Открыть канбан сотрудника">
+            <option value="">Канбан сотрудника…</option>
+            {employees.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        </div>
+      </div>
+      {!queues ? (
+        <div className="muted">Загрузка…</div>
+      ) : queues.length === 0 ? (
+        <div className="card muted">Нет сотрудников. <a href="#/employees">Добавить →</a></div>
+      ) : mode === 'load' ? (
+        <LoadView queues={queues} norm={norm} onOpen={select} reload={load} />
+      ) : mode === 'distribute' ? (
+        <DistributeView queues={queues} norm={norm} reload={load} />
       ) : (
-        <AllQueues onOpen={select} />
+        <AllQueues onOpen={select} queues={queues} setQueues={setQueues} />
       )}
     </div>
   );
@@ -65,21 +112,15 @@ export function QueuesPage() {
 
 /** Все очереди: колонки сотрудников (порядок меняется перетаскиванием за шапку),
  *  задачи переставляются внутри очереди и переносятся между сотрудниками (= смена ответственного в Б24) */
-function AllQueues({ onOpen }: { onOpen: (id: number) => void }) {
-  const { version, toast, bump, reloadEmployees } = useApp();
-  const [queues, setQueues] = useState<Queue[] | null>(null);
+function AllQueues({ onOpen, queues, setQueues }: { onOpen: (id: number) => void; queues: Queue[]; setQueues: (q: Queue[]) => void }) {
+  const { toast, bump, reloadEmployees } = useApp();
+  const [search, setSearch] = useState('');
   const [planFor, setPlanFor] = useState<Queue | null>(null);
   const [pickFor, setPickFor] = useState<Queue | null>(null);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const [activeCol, setActiveCol] = useState<Queue | null>(null);
   const [overEmp, setOverEmp] = useState<number | null>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
-
-  useEffect(() => {
-    api.get<Queue[]>('/queues').then(setQueues).catch((e) => toast(e.message, 'error'));
-  }, [version, toast]);
-
-  if (!queues) return <div className="muted">Загрузка…</div>;
 
   const empOf = (id: unknown): number | null => {
     const s = String(id);
@@ -100,6 +141,8 @@ function AllQueues({ onOpen }: { onOpen: (id: number) => void }) {
     const items = args.droppableContainers.filter((c) => ids.has(Number(c.id)));
     return items.length ? closestCenter({ ...args, droppableContainers: items }) : zones;
   };
+
+  const shown = queues.filter((x) => !search || x.employee.name.toLowerCase().includes(search.toLowerCase()));
 
   const saveOrder = (empId: number, tasks: Task[]) => api.put(`/queues/${empId}`, { taskIds: tasks.map((t) => t.id) });
 
@@ -178,17 +221,16 @@ function AllQueues({ onOpen }: { onOpen: (id: number) => void }) {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Очереди задач</h1>
+      <div className="toolbar load-toolbar">
+        <input className="search" placeholder="Показать сотрудников: имя" value={search} onChange={(e) => setSearch(e.target.value)} />
         <span className="muted small">
-          Колонки сотрудников перетаскиваются за шапку. Задачу можно перетащить в очередь другого сотрудника — он станет ответственным в Битрикс24.
+          Колонки перетаскиваются за шапку. Задачу можно перетащить в очередь другого сотрудника — он станет ответственным в Битрикс24.
         </span>
       </div>
-      {queues.length === 0 && <div className="card muted">Нет сотрудников. <a href="#/employees">Добавить →</a></div>}
       <DndContext sensors={sensors} collisionDetection={collision} onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={reset}>
-        <SortableContext items={queues.map((x) => COL + x.employee.id)} strategy={rectSortingStrategy}>
+        <SortableContext items={shown.map((x) => COL + x.employee.id)} strategy={rectSortingStrategy}>
           <div className="queues">
-            {queues.map((qu) => (
+            {shown.map((qu) => (
               <QueueColumn
                 key={qu.employee.id}
                 queue={qu}
@@ -287,7 +329,7 @@ function QueueColumn({ queue, isTarget, onPlan, onPick, onOpen }: { queue: Queue
   );
 }
 
-function SortableItem({ task, index }: { task: Task; index: number }) {
+export function SortableItem({ task, index }: { task: Task; index: number }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id });
   return (
     <div ref={setNodeRef} className="queue-item" style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}>
@@ -305,7 +347,7 @@ function SortableItem({ task, index }: { task: Task; index: number }) {
 
 interface PlanRow { taskId: number; title: string; days: number; start: string; end: string; deadline: string | null; conflict: boolean }
 
-function PlanModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
+export function PlanModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
   const { toast, bump } = useApp();
   const [startDate, setStartDate] = useState(toYmd(new Date().toISOString()));
   const [link, setLink] = useState(true);
@@ -370,7 +412,7 @@ function PlanModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
   );
 }
 
-function PickModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
+export function PickModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
   const { meta, toast, bump, employees } = useApp();
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [search, setSearch] = useState('');

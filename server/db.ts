@@ -349,6 +349,7 @@ export const DEFAULT_USER_SETTINGS = {
   doneVisibleDays: 14,    // сколько дней показывать закрытые задачи на канбане
   defaultTaskDays: 2,     // длительность задачи по умолчанию для Ганта
   workdayHours: 8,
+  loadNorm: 8,            // норма открытых задач на сотрудника — выше считается перегрузкой
 };
 export type Settings = typeof DEFAULT_USER_SETTINGS;
 

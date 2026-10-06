@@ -12,6 +12,7 @@ const FIELDS = [
   { key: 'doneVisibleDays', label: 'Показывать закрытые задачи, дней', hint: 'На канбане и в списках' },
   { key: 'defaultTaskDays', label: 'Длительность задачи без оценки, раб. дней', hint: 'Для построения цепочки в Ганте' },
   { key: 'workdayHours', label: 'Рабочих часов в дне', hint: 'Перевод оценки времени задачи в дни' },
+  { key: 'loadNorm', label: 'Норма задач на сотрудника', hint: 'Открытых задач больше нормы — сотрудник считается перегруженным (раздел «Очереди»)' },
 ] as const;
 
 export function SettingsPage() {

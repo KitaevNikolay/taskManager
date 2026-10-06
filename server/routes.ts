@@ -403,7 +403,7 @@ function queueFor(userId: number, empId: number) {
 api.get('/queues', (req, res) => {
   const u = uid(req);
   const emps = q.all<any>('SELECT * FROM employees WHERE user_id = ? ORDER BY sort_order, name', u);
-  res.json(emps.map((e) => ({ employee: e, tasks: queueFor(u, e.id) })));
+  res.json(emps.map((e) => ({ employee: { ...e, ...absenceInfo(u, e.id) }, tasks: queueFor(u, e.id) })));
 });
 
 api.put('/queues/:empId', (req, res) => {
