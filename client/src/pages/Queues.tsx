@@ -5,7 +5,7 @@ import {
 } from '@dnd-kit/core';
 import { SortableContext, arrayMove, rectSortingStrategy, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { api, fmtDate, toYmd, type Employee, type Task } from '../api';
+import { api, departmentOf, fmtDate, taskState, toYmd, type Employee, type Task } from '../api';
 import { useApp } from '../App';
 import { Avatar, TaskCard } from '../components/TaskCard';
 import { TaskBoard } from './Kanban';
@@ -18,8 +18,10 @@ const DROP = 'drop:';
 const readEmployeeFromHash = () => Number(new URLSearchParams(window.location.hash.split('?')[1] || '').get('employee')) || null;
 
 export function QueuesPage() {
-  const { employees } = useApp();
+  const { employees, meta } = useApp();
   const [selected, setSelected] = useState<number | null>(readEmployeeFromHash);
+  const [groupId, setGroupId] = useState<number | null>(null);
+  const boardGroup = groupId ?? meta?.departments[0]?.group_id ?? null;
 
   const select = (id: number | null) => {
     setSelected(id);
@@ -49,6 +51,8 @@ export function QueuesPage() {
       {emp ? (
         <TaskBoard
           employeeId={emp.id}
+          groupId={boardGroup}
+          onSelectGroup={setGroupId}
           onSelectEmployee={select}
           title={<>Задачи: {emp.name}{!!emp.is_buffer && <span className="chip warn buffer-chip">буфер</span>} <AbsenceBadge employee={emp} /></>}
         />
@@ -226,10 +230,9 @@ function QueueColumn({ queue, isTarget, onPlan, onPick, onOpen }: { queue: Queue
   const { employee: e, tasks } = queue;
   const sortable = useSortable({ id: COL + e.id });
   const drop = useDroppable({ id: DROP + e.id });
-  // Для задач группы отдела «в работе» и «на паузе» определяются стадией, для остальных — статусом
-  const inGroup = (t: Task) => t.group_id === meta?.groupId && !!meta?.workStageId;
-  const isWorking = (t: Task) => (inGroup(t) ? t.stage_id === meta!.workStageId : t.status === 3);
-  const isPaused = (t: Task) => (inGroup(t) ? t.stage_id === meta!.pauseStageId : t.status === 6);
+  // «В работе» / «на паузе»: в группах со стадией «Выполняются» — по стадии, иначе по статусу задачи
+  const isWorking = (t: Task) => taskState(meta, t).working;
+  const isPaused = (t: Task) => taskState(meta, t).paused;
   const inWork = tasks.filter(isWorking);
   const next = tasks.find((t) => !isWorking(t) && !isPaused(t) && t.status !== 4);
   const overdue = tasks.filter((t) => t.deadline && new Date(t.deadline) < new Date()).length;
@@ -237,7 +240,8 @@ function QueueColumn({ queue, isTarget, onPlan, onPick, onOpen }: { queue: Queue
 
   const start = async (t: Task) => {
     try {
-      if (inGroup(t)) await api.post(`/tasks/${t.id}/stage`, { stageId: meta!.workStageId });
+      const workStage = t.group_id != null ? meta?.workByGroup[t.group_id] : undefined;
+      if (workStage) await api.post(`/tasks/${t.id}/stage`, { stageId: workStage });
       else await api.post(`/tasks/${t.id}/status`, { action: 'start' });
       toast(`#${t.id} взята в работу`, 'ok');
       bump();
@@ -372,10 +376,11 @@ function PickModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const empIds = new Set(employees.map((e) => e.id));
-  const stageTitle = (id: number | null) => meta?.stages.find((s) => s.id === id)?.title || '—';
+  const stageTitle = (id: number | null) => meta?.allStages.find((s) => s.id === id)?.title || '—';
+  const depTitle = (t: Task) => departmentOf(meta, t)?.title;
 
   useEffect(() => {
-    api.get<Task[]>('/tasks?scope=group').then((all) =>
+    api.get<Task[]>('/tasks?scope=departments').then((all) =>
       setTasks(all.filter((t) => t.status !== 5 && t.status !== 7 && t.responsible_id !== queue.employee.id)
         .sort((a, b) => Number(empIds.has(a.responsible_id!)) - Number(empIds.has(b.responsible_id!)) || (a.stage_id || 0) - (b.stage_id || 0))),
     );
@@ -408,7 +413,7 @@ function PickModal({ queue, onClose }: { queue: Queue; onClose: () => void }) {
             <div key={t.id} className="pick-row">
               <div>
                 <div>#{t.id} {t.title}</div>
-                <div className="muted small">{stageTitle(t.stage_id)} · {t.responsible_name || 'без ответственного'}{t.deadline ? ` · до ${fmtDate(t.deadline)}` : ''}</div>
+                <div className="muted small">{depTitle(t) ? `${depTitle(t)} · ` : ''}{stageTitle(t.stage_id)} · {t.responsible_name || 'без ответственного'}{t.deadline ? ` · до ${fmtDate(t.deadline)}` : ''}</div>
               </div>
               <button className="btn sm" disabled={busy} onClick={() => assign(t)}>Назначить</button>
             </div>

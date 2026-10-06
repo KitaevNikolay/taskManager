@@ -17,6 +17,15 @@
     <meta property="og:title" content="Задачи отдела" />
     <meta property="og:description" content="Канбан, очереди, Гант и алерты по задачам отдела из Битрикс24" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // Тема до загрузки приложения, чтобы не мигало светлым
+      (function () {
+        var t = 'auto';
+        try { t = localStorage.getItem('theme') || 'auto'; } catch (e) {}
+        if (t !== 'light' && t !== 'dark') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = t;
+      })();
+    </script>
     <link rel="apple-touch-icon" href="/favicon.svg" />
   </head>
   <body>

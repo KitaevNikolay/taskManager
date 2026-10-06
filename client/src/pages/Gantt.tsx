@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ABSENCE_TYPES, api, fmtDate, fmtYmd, toYmd, type Absence, type Task } from '../api';
+import { ABSENCE_TYPES, api, departmentOf, fmtDate, fmtYmd, toYmd, type Absence, type Task } from '../api';
 import { useApp } from '../App';
 
 const ROW_H = 32;
@@ -43,7 +43,9 @@ export function GanttPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const url = scope === 'all' ? '/tasks?scope=all' : scope === 'group' ? '/tasks?scope=group' : `/tasks?scope=employee&employeeId=${scope}`;
+    const url = scope === 'all' ? '/tasks?scope=all'
+      : scope.startsWith('d:') ? `/tasks?scope=department&groupId=${scope.slice(2)}`
+      : `/tasks?scope=employee&employeeId=${scope}`;
     api.get<Task[]>(url).then((ts) => setTasks(ts.filter((t) => t.status !== 5 && t.status !== 7))).catch((e) => toast(e.message, 'error'));
   }, [scope, version, toast]);
 
@@ -229,9 +231,17 @@ export function GanttPage() {
         <h1>Гант</h1>
         <div className="toolbar">
           <select value={scope} onChange={(e) => setScope(e.target.value)}>
-            <option value="all">Отдел + задачи сотрудников</option>
-            <option value="group">Только группа {meta?.groupId}</option>
-            {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            <option value="all">Все мои отделы и сотрудники</option>
+            {!!meta?.departments.length && (
+              <optgroup label="Отдел">
+                {meta.departments.map((d) => <option key={d.id} value={`d:${d.group_id}`}>{d.title}</option>)}
+              </optgroup>
+            )}
+            {employees.length > 0 && (
+              <optgroup label="Сотрудник">
+                {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </optgroup>
+            )}
           </select>
           <label className="check"><input type="checkbox" checked={onlyPlanned} onChange={(e) => setOnlyPlanned(e.target.checked)} /> Только с планом</label>
           <div className="seg">
@@ -296,9 +306,9 @@ export function GanttPage() {
                 </span>
                 {pos ? (
                   <div
-                    className={`gantt-bar st${t.status} ${late ? 'late' : ''} ${linkFrom === t.id ? 'link-src' : ''} ${linkMode ? 'linking' : ''}`}
-                    style={{ left: LABEL_W + x(pos.s), width: (pos.e - pos.s + 1) * dayW - 2, top: 5, height: ROW_H - 10 }}
-                    title={`${t.title}\n${fmtDate(numToYmd(pos.s))} – ${fmtDate(numToYmd(pos.e))}${t.deadline ? `\nКрайний срок: ${fmtDate(t.deadline)}` : ''}`}
+                    className={`gantt-bar st${t.status} ${late ? 'late' : ''} ${linkFrom === t.id ? 'link-src' : ''} ${linkMode ? 'linking' : ''} ${departmentOf(meta, t) ? 'has-dep' : ''}`}
+                    style={{ left: LABEL_W + x(pos.s), width: (pos.e - pos.s + 1) * dayW - 2, top: 5, height: ROW_H - 10, ['--dep' as string]: departmentOf(meta, t)?.color }}
+                    title={`${t.title}${departmentOf(meta, t) ? ` · ${departmentOf(meta, t)!.title}` : ''}\n${fmtDate(numToYmd(pos.s))} – ${fmtDate(numToYmd(pos.e))}${t.deadline ? `\nКрайний срок: ${fmtDate(t.deadline)}` : ''}`}
                     onPointerDown={(e) => {
                       if (linkMode) return;
                       const rect = e.currentTarget.getBoundingClientRect();

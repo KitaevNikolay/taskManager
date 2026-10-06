@@ -2,9 +2,9 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import crypto from 'node:crypto';
 import nodemailer from 'nodemailer';
-import { q } from './db.ts';
+import { q, claimOrphans } from './db.ts';
 
-export interface User { id: number; login: string; email: string | null; name: string | null }
+export interface User { id: number; login: string; email: string | null; name: string | null; role: 'admin' | 'user'; theme: 'auto' | 'light' | 'dark' }
 
 const SESSION_DAYS = 30;
 const RESET_MINUTES = 60;
@@ -42,7 +42,7 @@ function checkPasswordStrength(p: unknown): string {
 }
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
-const publicUser = (u: any): User => ({ id: u.id, login: u.login, email: u.email, name: u.name });
+const publicUser = (u: any): User => ({ id: u.id, login: u.login, email: u.email, name: u.name, role: u.role === 'admin' ? 'admin' : 'user', theme: u.theme || 'auto' });
 
 // ---------- Сессии ----------
 const COOKIE = 'sid';
@@ -77,7 +77,37 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if ((req as any).user?.role !== 'admin') return res.status(403).json({ error: 'Доступно только администратору' });
+  next();
+}
+
 const usersCount = () => q.get<{ n: number }>('SELECT COUNT(*) AS n FROM users')!.n;
+const adminsCount = () => q.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")!.n;
+
+/** Создать пользователя. Первый пользователь — администратор и забирает данные прежней версии. */
+export function createUser(f: { login: string; email?: string | null; name?: string | null; passwordHash: string; role?: 'admin' | 'user' }) {
+  const first = usersCount() === 0;
+  const r = q.run(
+    'INSERT INTO users(login, email, name, password_hash, role) VALUES(?,?,?,?,?)',
+    f.login, f.email || null, f.name || null, f.passwordHash, first ? 'admin' : f.role === 'admin' ? 'admin' : 'user',
+  );
+  const id = Number(r.lastInsertRowid);
+  if (first) claimOrphans(id);
+  return id;
+}
+
+/** Удалить пользователя вместе с его областью работы */
+function deleteUserData(id: number) {
+  q.tx(() => {
+    q.run('DELETE FROM absence_shifts WHERE absence_id IN (SELECT id FROM absences WHERE user_id = ?)', id);
+    q.run('DELETE FROM notes WHERE tab_id IN (SELECT id FROM note_tabs WHERE user_id = ?)', id);
+    for (const t of ['absences', 'note_tabs', 'employees', 'departments', 'queue', 'alerts', 'task_notify', 'push_subscriptions', 'sessions', 'password_resets']) {
+      q.run(`DELETE FROM ${t} WHERE user_id = ?`, id);
+    }
+    q.run('DELETE FROM users WHERE id = ?', id);
+  });
+}
 
 // ---------- Защита от перебора ----------
 // 5 неудачных попыток на логин с одного IP — блокировка на 5 минут; 30 попыток с IP за 15 минут — на 15 минут
@@ -153,8 +183,8 @@ authApi.post('/auth/setup', (req, res) => {
   const login = String(b.login || '').trim();
   if (!/^[\w.@-]{3,50}$/.test(login)) throw new AuthError(400, 'Логин: 3–50 символов, латиница, цифры, . _ @ -');
   const password = checkPasswordStrength(b.password);
-  const r = q.run('INSERT INTO users(login, email, name, password_hash) VALUES(?,?,?,?)', login, String(b.email || '').trim() || null, String(b.name || '').trim() || null, hashPassword(password));
-  startSession(req, res, Number(r.lastInsertRowid));
+  const id = createUser({ login, email: String(b.email || '').trim(), name: String(b.name || '').trim(), passwordHash: hashPassword(password) });
+  startSession(req, res, id);
   res.json({ ok: true });
 });
 
@@ -220,46 +250,77 @@ authApi.post('/auth/reset', (req, res) => {
 
 // ---------- Пользователи (только после входа) ----------
 export const usersApi = Router();
+const me = (req: Request) => (req as any).user as User;
+const validLogin = (v: unknown) => {
+  const login = String(v || '').trim();
+  if (!/^[\w.@-]{3,50}$/.test(login)) throw new AuthError(400, 'Логин: 3–50 символов, латиница, цифры, . _ @ -');
+  return login;
+};
 
-usersApi.get('/users', (req, res) => {
-  res.json({ me: (req as any).user, users: q.all('SELECT id, login, email, name, created_at FROM users ORDER BY id'), mailConfigured: mailConfigured() });
+/** Свой профиль: имя и почта */
+usersApi.put('/users-me', (req, res) => {
+  q.run('UPDATE users SET name = ?, email = ? WHERE id = ?', String(req.body?.name || '').trim() || null, String(req.body?.email || '').trim() || null, me(req).id);
+  res.json({ ok: true });
 });
 
-usersApi.post('/users', (req, res) => {
+usersApi.get('/users', requireAdmin, (req, res) => {
+  res.json({
+    me: me(req),
+    users: q.all(
+      `SELECT u.id, u.login, u.email, u.name, u.role, u.created_at,
+         (SELECT COUNT(*) FROM departments d WHERE d.user_id = u.id) AS departments,
+         (SELECT COUNT(*) FROM employees e WHERE e.user_id = u.id) AS employees
+       FROM users u ORDER BY u.id`,
+    ),
+    mailConfigured: mailConfigured(),
+  });
+});
+
+usersApi.post('/users', requireAdmin, (req, res) => {
   const b = req.body || {};
-  const login = String(b.login || '').trim();
-  if (!/^[\w.@-]{3,50}$/.test(login)) throw new AuthError(400, 'Логин: 3–50 символов, латиница, цифры, . _ @ -');
+  const login = validLogin(b.login);
   if (q.get('SELECT id FROM users WHERE login = ?', login)) throw new AuthError(409, 'Такой логин уже есть');
   const password = checkPasswordStrength(b.password);
-  q.run('INSERT INTO users(login, email, name, password_hash) VALUES(?,?,?,?)', login, String(b.email || '').trim() || null, String(b.name || '').trim() || null, hashPassword(password));
+  createUser({ login, email: String(b.email || '').trim(), name: String(b.name || '').trim(), passwordHash: hashPassword(password), role: b.role });
   res.json({ ok: true });
 });
 
-usersApi.put('/users/:id', (req, res) => {
+usersApi.put('/users/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
-  q.run('UPDATE users SET name = ?, email = ? WHERE id = ?', String(req.body?.name || '').trim() || null, String(req.body?.email || '').trim() || null, id);
+  const u = q.get<any>('SELECT * FROM users WHERE id = ?', id);
+  if (!u) throw new AuthError(404, 'Пользователь не найден');
+  const role = req.body?.role === 'admin' ? 'admin' : req.body?.role === 'user' ? 'user' : u.role;
+  if (u.role === 'admin' && role !== 'admin' && adminsCount() <= 1) throw new AuthError(400, 'Нельзя снять роль с последнего администратора');
+  q.run('UPDATE users SET name = ?, email = ?, role = ? WHERE id = ?', String(req.body?.name ?? u.name ?? '').trim() || null, String(req.body?.email ?? u.email ?? '').trim() || null, role, id);
   res.json({ ok: true });
 });
 
-usersApi.delete('/users/:id', (req, res) => {
+usersApi.delete('/users/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
-  if (id === (req as any).user.id) throw new AuthError(400, 'Нельзя удалить самого себя');
-  q.run('DELETE FROM sessions WHERE user_id = ?', id);
-  q.run('DELETE FROM password_resets WHERE user_id = ?', id);
-  q.run('DELETE FROM users WHERE id = ?', id);
+  if (id === me(req).id) throw new AuthError(400, 'Нельзя удалить самого себя');
+  const u = q.get<any>('SELECT role FROM users WHERE id = ?', id);
+  if (u?.role === 'admin' && adminsCount() <= 1) throw new AuthError(400, 'Нельзя удалить последнего администратора');
+  deleteUserData(id);
   res.json({ ok: true });
+});
+
+/** Ссылка для установки пароля — администратор передаёт её пользователю (если почта не настроена) */
+usersApi.post('/users/:id/reset-link', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!q.get('SELECT id FROM users WHERE id = ?', id)) throw new AuthError(404, 'Пользователь не найден');
+  res.json({ link: createResetLink(id), minutes: RESET_MINUTES });
 });
 
 usersApi.put('/users-me/password', (req, res) => {
-  const me = (req as any).user as User;
-  const u = q.get<any>('SELECT * FROM users WHERE id = ?', me.id);
+  const self = me(req);
+  const u = q.get<any>('SELECT * FROM users WHERE id = ?', self.id);
   if (!u || !verifyPassword(String(req.body?.current || ''), u.password_hash)) throw new AuthError(400, 'Текущий пароль указан неверно');
   const password = checkPasswordStrength(req.body?.password);
   q.tx(() => {
-    q.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), me.id);
-    q.run('DELETE FROM sessions WHERE user_id = ?', me.id); // остальные устройства выйдут
+    q.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), self.id);
+    q.run('DELETE FROM sessions WHERE user_id = ?', self.id); // остальные устройства выйдут
   });
-  startSession(req, res, me.id);
+  startSession(req, res, self.id);
   res.json({ ok: true });
 });
 

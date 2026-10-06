@@ -1,18 +1,23 @@
 import { Router, type Request, type Response } from 'express';
-import { q, getSettings, saveSettings } from './db.ts';
-import { call, callResult, BitrixError, GROUP_ID, PORTAL_URL } from './bitrix.ts';
+import { q, getSettings, saveSettings, getGlobalSettings, saveGlobalSettings } from './db.ts';
+import { call, callResult, BitrixError, PORTAL_URL } from './bitrix.ts';
 import { runSync, refreshTask, forgetTask, publicSyncState, syncState, STATUS_NAMES } from './sync.ts';
-import { runRules } from './alerts.ts';
+import { runRulesFor } from './alerts.ts';
 import { bus } from './bus.ts';
 import { absencesApi, absenceInfo, dayoffStats } from './absences.ts';
 import { notifyApi } from './notify.ts';
 import { notesApi } from './notes.ts';
+import { departmentsApi } from './departments.ts';
 import { absentDays, addWorkdays, nextWorkday, todayYmd, workdaysBetween } from './calendar.ts';
+import {
+  SCOPE_SQL, ScopeError, assertDepartmentGroup, assertEmployee, assertTaskAccess, inWorkSql, stageRoles, taskState, userDepartments,
+} from './scope.ts';
 
 export const api = Router();
 api.use(absencesApi);
 api.use(notifyApi);
 api.use(notesApi);
+api.use(departmentsApi);
 
 class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -24,93 +29,99 @@ const int = (v: unknown, name = 'id') => {
   if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, `Некорректный ${name}`);
   return n;
 };
-
-// ---------- Стадии ----------
-/** Стадии, по которым определяем «в работе» и «на паузе» для задач группы отдела */
-function specialStages() {
-  const st = q.all<{ id: number; title: string }>('SELECT id, title FROM stages WHERE entity_id = ? ORDER BY sort', GROUP_ID);
-  return {
-    work: st.find((x) => /выполня|в работе/i.test(x.title))?.id ?? null,
-    pause: st.find((x) => /пауз/i.test(x.title))?.id ?? null,
-  };
-}
-/** SQL-условие «задача в работе»: для группы — стадия, для остальных — статус */
-const inWorkSql = () => {
-  const { work } = specialStages();
-  return work ? `((t.group_id = ${GROUP_ID} AND t.stage_id = ${work}) OR (COALESCE(t.group_id, 0) != ${GROUP_ID} AND t.status = 3))` : 't.status = 3';
-};
+const uid = (req: Request) => (req as any).user.id as number;
+const isAdmin = (req: Request) => (req as any).user.role === 'admin';
 
 // ---------- Мета ----------
-api.get('/meta', (_req, res) => {
-  const { work, pause } = specialStages();
+api.get('/meta', (req, res) => {
+  const roles = stageRoles();
   res.json({
     portalUrl: PORTAL_URL,
-    groupId: GROUP_ID,
     selfUserId: syncState.selfUserId,
-    stages: q.all('SELECT * FROM stages WHERE entity_id = ? ORDER BY sort', GROUP_ID),
+    departments: userDepartments(uid(req)),
     allStages: q.all('SELECT * FROM stages ORDER BY entity_id, sort'),
-    workStageId: work,
-    pauseStageId: pause,
+    workStageIds: roles.workStageIds,
+    pauseStageIds: roles.pauseStageIds,
+    groupsWithWork: roles.groupsWithWork,
+    workByGroup: roles.workByGroup,
     statusNames: STATUS_NAMES,
     sync: publicSyncState(),
   });
 });
 
+/** Тема оформления пользователя */
+api.put('/me/theme', (req, res) => {
+  const theme = ['auto', 'light', 'dark'].includes(req.body?.theme) ? req.body.theme : 'auto';
+  q.run('UPDATE users SET theme = ? WHERE id = ?', theme, uid(req));
+  res.json({ theme });
+});
+
 // ---------- Сотрудники ----------
-api.get('/employees', (_req, res) => {
+api.get('/employees', (req, res) => {
   const now = new Date().toISOString();
+  const u = uid(req);
   res.json(
     q.all<any>(
       `SELECT e.*,
          (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7)) AS open_count,
          (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7) AND t.deadline IS NOT NULL AND t.deadline < ?) AS overdue_count,
          (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7) AND ${inWorkSql()}) AS in_progress_count
-       FROM employees e ORDER BY e.sort_order, e.name`,
-      now,
-    ).map((e) => ({ ...e, dayoff: dayoffStats(e.id), ...absenceInfo(e.id) })),
+       FROM employees e WHERE e.user_id = ? ORDER BY e.sort_order, e.name`,
+      now, u,
+    ).map((e) => ({ ...e, dayoff: dayoffStats(u, e.id), ...absenceInfo(u, e.id) })),
   );
 });
 
 api.post('/employees', async (req, res) => {
   const b = req.body || {};
+  const u = uid(req);
   const id = int(b.id, 'ID сотрудника');
   if (!String(b.name || '').trim()) throw new HttpError(400, 'Укажите ФИО');
-  if (q.get('SELECT id FROM employees WHERE id = ?', id)) throw new HttpError(409, 'Сотрудник с таким ID уже добавлен');
-  const last = q.get<{ m: number }>('SELECT COALESCE(MAX(sort_order), 0) AS m FROM employees')!.m;
-  q.run('INSERT INTO employees(id, name, department, email, position, photo, is_buffer, sort_order, dayoff_granted) VALUES(?,?,?,?,?,?,?,?,?)', id, b.name.trim(), b.department, b.email, b.position, b.photo, !!b.is_buffer, last + 1, Number(b.dayoff_granted) || 0);
-  res.json(q.get('SELECT * FROM employees WHERE id = ?', id));
+  if (q.get('SELECT id FROM employees WHERE user_id = ? AND id = ?', u, id)) throw new HttpError(409, 'Сотрудник с таким ID уже добавлен');
+  const last = q.get<{ m: number }>('SELECT COALESCE(MAX(sort_order), 0) AS m FROM employees WHERE user_id = ?', u)!.m;
+  q.run('INSERT INTO employees(user_id, id, name, department, email, position, photo, is_buffer, sort_order, dayoff_granted) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    u, id, b.name.trim(), b.department, b.email, b.position, b.photo, !!b.is_buffer, last + 1, Number(b.dayoff_granted) || 0);
+  res.json(q.get('SELECT * FROM employees WHERE user_id = ? AND id = ?', u, id));
   void runSync({ full: true }); // подтянуть задачи нового сотрудника
 });
 
 api.put('/employees/:id', (req, res) => {
   const id = int(req.params.id);
+  const u = uid(req);
+  assertEmployee(u, id);
   const b = req.body || {};
   if (!String(b.name || '').trim()) throw new HttpError(400, 'Укажите ФИО');
-  q.run('UPDATE employees SET name=?, department=?, email=?, position=?, photo=COALESCE(?, photo), is_buffer=?, dayoff_granted=COALESCE(?, dayoff_granted) WHERE id=?',
-    b.name.trim(), b.department, b.email, b.position, b.photo, !!b.is_buffer, b.dayoff_granted === undefined || b.dayoff_granted === '' ? null : Number(b.dayoff_granted) || 0, id);
-  res.json(q.get('SELECT * FROM employees WHERE id = ?', id));
+  q.run('UPDATE employees SET name=?, department=?, email=?, position=?, photo=COALESCE(?, photo), is_buffer=?, dayoff_granted=COALESCE(?, dayoff_granted) WHERE user_id=? AND id=?',
+    b.name.trim(), b.department, b.email, b.position, b.photo, !!b.is_buffer, b.dayoff_granted === undefined || b.dayoff_granted === '' ? null : Number(b.dayoff_granted) || 0, u, id);
+  res.json(q.get('SELECT * FROM employees WHERE user_id = ? AND id = ?', u, id));
 });
 
 /** Выдать/списать дни отгула (delta может быть отрицательной) */
 api.post('/employees/:id/dayoffs', (req, res) => {
   const id = int(req.params.id);
+  assertEmployee(uid(req), id);
   const delta = Number(req.body?.delta);
   if (!Number.isFinite(delta) || delta === 0) throw new HttpError(400, 'Укажите количество дней');
-  q.run('UPDATE employees SET dayoff_granted = dayoff_granted + ? WHERE id = ?', delta, id);
-  res.json(dayoffStats(id));
+  q.run('UPDATE employees SET dayoff_granted = dayoff_granted + ? WHERE user_id = ? AND id = ?', delta, uid(req), id);
+  res.json(dayoffStats(uid(req), id));
 });
 
 /** Порядок сотрудников на экране */
 api.put('/employees-order', (req, res) => {
   const ids: number[] = (req.body?.ids || []).map(Number);
-  q.tx(() => ids.forEach((id, i) => q.run('UPDATE employees SET sort_order = ? WHERE id = ?', i + 1, id)));
+  q.tx(() => ids.forEach((id, i) => q.run('UPDATE employees SET sort_order = ? WHERE user_id = ? AND id = ?', i + 1, uid(req), id)));
   res.json({ ok: true });
 });
 
 api.delete('/employees/:id', (req, res) => {
   const id = int(req.params.id);
-  q.run('DELETE FROM employees WHERE id = ?', id);
-  q.run('DELETE FROM queue WHERE employee_id = ?', id);
+  const u = uid(req);
+  q.tx(() => {
+    q.run('DELETE FROM employees WHERE user_id = ? AND id = ?', u, id);
+    q.run('DELETE FROM queue WHERE user_id = ? AND employee_id = ?', u, id);
+    q.run('DELETE FROM absence_shifts WHERE absence_id IN (SELECT id FROM absences WHERE user_id = ? AND employee_id = ?)', u, id);
+    q.run('DELETE FROM absences WHERE user_id = ? AND employee_id = ?', u, id);
+  });
   res.json({ ok: true });
 });
 
@@ -142,7 +153,7 @@ api.get('/bitrix/user/:id', async (req, res) => {
     const r = await call<any>('tasks.task.list', { filter: { RESPONSIBLE_ID: id }, select: ['ID', 'RESPONSIBLE_ID'], start: -1 });
     const resp = r.result?.tasks?.[0]?.responsible;
     let name = resp?.name;
-    let position = resp?.workPosition || null;
+    const position = resp?.workPosition || null;
     const photo = resp?.icon ? PORTAL_URL + resp.icon : null;
     if (!name) {
       const r2 = await call<any>('tasks.task.list', { filter: { CREATED_BY: id }, select: ['ID', 'CREATED_BY'], start: -1 });
@@ -158,11 +169,18 @@ api.get('/bitrix/user/:id', async (req, res) => {
 });
 
 // ---------- Задачи ----------
-const TASK_COLS = `t.*,
-  (SELECT COUNT(*) FROM alerts a WHERE a.task_id = t.id AND a.read_at IS NULL) AS unread_alerts,
-  (SELECT position FROM queue qu WHERE qu.task_id = t.id AND qu.employee_id = t.responsible_id) AS queue_pos,
-  (SELECT 1 FROM employees e WHERE e.id = t.responsible_id) AS is_employee,
-  (SELECT mode FROM task_notify n WHERE n.task_id = t.id) AS notify`;
+/** Колонки задачи с учётом пользователя: его алерты, очередь, сотрудники, отметки оповещений, отдел */
+const taskCols = () => `t.*,
+  (SELECT COUNT(*) FROM alerts a WHERE a.task_id = t.id AND a.user_id = :u AND a.read_at IS NULL) AS unread_alerts,
+  (SELECT position FROM queue qu WHERE qu.task_id = t.id AND qu.employee_id = t.responsible_id AND qu.user_id = :u) AS queue_pos,
+  (SELECT 1 FROM employees e WHERE e.id = t.responsible_id AND e.user_id = :u) AS is_employee,
+  (SELECT mode FROM task_notify n WHERE n.task_id = t.id AND n.user_id = :u) AS notify,
+  (SELECT d.id FROM departments d WHERE d.group_id = t.group_id AND d.user_id = :u) AS department_id`;
+
+/** Запрос задач пользователя: :u подставляется числом (ID берётся из сессии, не из запроса) */
+function selectTasks(userId: number, where: string, ...params: unknown[]) {
+  return q.all<any>(`SELECT ${taskCols().replaceAll(':u', String(userId))} FROM tasks t WHERE ${where}`, ...params).map(parseTask);
+}
 
 function parseTask(t: any) {
   if (!t) return t;
@@ -170,23 +188,32 @@ function parseTask(t: any) {
 }
 
 api.get('/tasks', (req, res) => {
-  const s = getSettings();
+  const u = uid(req);
+  const s = getSettings(u);
   const doneSince = new Date(Date.now() - s.doneVisibleDays * 86400e3).toISOString();
-  const scope = String(req.query.scope || 'group');
+  const scope = String(req.query.scope || 'all');
   const closedCond = `(t.status NOT IN (5,7) OR t.closed_date >= ?)`;
   let rows: any[];
   if (scope === 'employee') {
-    rows = q.all(`SELECT ${TASK_COLS} FROM tasks t WHERE t.responsible_id = ? AND ${closedCond}`, int(req.query.employeeId, 'employeeId'), doneSince);
-  } else if (scope === 'all') {
-    rows = q.all(`SELECT ${TASK_COLS} FROM tasks t WHERE (t.group_id = ? OR t.responsible_id IN (SELECT id FROM employees)) AND ${closedCond}`, GROUP_ID, doneSince);
+    const emp = int(req.query.employeeId, 'employeeId');
+    assertEmployee(u, emp);
+    rows = selectTasks(u, `t.responsible_id = ? AND ${closedCond}`, emp, doneSince);
+  } else if (scope === 'department') {
+    const g = int(req.query.groupId, 'groupId');
+    assertDepartmentGroup(u, g);
+    rows = selectTasks(u, `t.group_id = ? AND ${closedCond}`, g, doneSince);
+  } else if (scope === 'departments') {
+    rows = selectTasks(u, `t.group_id IN (SELECT group_id FROM departments WHERE user_id = ?) AND ${closedCond}`, u, doneSince);
   } else {
-    rows = q.all(`SELECT ${TASK_COLS} FROM tasks t WHERE t.group_id = ? AND ${closedCond}`, GROUP_ID, doneSince);
+    rows = selectTasks(u, `${SCOPE_SQL()} AND ${closedCond}`, u, u, doneSince);
   }
-  res.json(rows.map(parseTask));
+  res.json(rows);
 });
 
 api.get('/tasks/:id', async (req, res) => {
   const id = int(req.params.id);
+  const u = uid(req);
+  assertTaskAccess(u, id);
   let live: any = null;
   try {
     live = (await callResult<any>('tasks.task.get', { taskId: id, select: ['ID', 'DESCRIPTION', 'TAGS', 'ACCOMPLICES', 'AUDITORS'] }))?.task;
@@ -197,36 +224,46 @@ api.get('/tasks/:id', async (req, res) => {
   } catch (e) {
     if (!(e instanceof BitrixError)) throw e;
   }
-  const task = parseTask(q.get(`SELECT ${TASK_COLS} FROM tasks t WHERE t.id = ?`, id));
+  const [task] = selectTasks(u, 't.id = ?', id);
   if (!task) throw new HttpError(404, 'Задача не найдена в локальной базе');
   const deps = q.all('SELECT id, title, status, start_date_plan, end_date_plan, deadline FROM tasks WHERE id IN (SELECT value FROM json_each(?))', JSON.stringify(task.depends_on));
   const successors = q.all("SELECT id, title, status FROM tasks WHERE EXISTS (SELECT 1 FROM json_each(tasks.depends_on) WHERE value = ?)", id);
-  const alerts = q.all('SELECT * FROM alerts WHERE task_id = ? ORDER BY id DESC LIMIT 30', id);
+  const alerts = q.all('SELECT * FROM alerts WHERE task_id = ? AND user_id = ? ORDER BY id DESC LIMIT 30', id, u);
   res.json({ ...task, description: live?.description ?? null, accomplicesData: live?.accomplicesData, auditorsData: live?.auditorsData, tags: live?.tags ?? task.tags, predecessors: deps, successors, alerts, url: taskUrl(task) });
 });
 
 const taskUrl = (t: any) => `${PORTAL_URL}/company/personal/user/${t.responsible_id || 0}/tasks/task/view/${t.id}/`;
 
-async function done(res: Response, id: number) {
-  q.run('UPDATE alerts SET read_at = ? WHERE task_id = ? AND read_at IS NULL AND type IN (?, ?)', new Date().toISOString(), id, 'overdue', 'deadline_soon');
+async function done(req: Request, res: Response, id: number) {
+  const u = uid(req);
+  q.run('UPDATE alerts SET read_at = ? WHERE task_id = ? AND user_id = ? AND read_at IS NULL AND type IN (?, ?)', new Date().toISOString(), id, u, 'overdue', 'deadline_soon');
   const t = await refreshTask(id);
   if (!t) throw new HttpError(404, 'Задача удалена в Битрикс24');
-  runRules();
-  res.json(parseTask(q.get(`SELECT ${TASK_COLS} FROM tasks t WHERE t.id = ?`, (t as any).id)));
+  runRulesFor(u);
+  res.json(selectTasks(u, 't.id = ?', id)[0]);
 }
 
 api.post('/tasks/:id/stage', async (req, res) => {
   const id = int(req.params.id);
+  assertTaskAccess(uid(req), id);
   const stageId = int(req.body?.stageId, 'stageId');
+  const task = q.get<{ group_id: number }>('SELECT group_id FROM tasks WHERE id = ?', id);
+  if (!q.get('SELECT 1 FROM stages WHERE id = ? AND entity_id = ?', stageId, task?.group_id ?? -1)) {
+    throw new HttpError(400, 'Стадия не из канбана группы этой задачи');
+  }
   await callResult('task.stages.movetask', { id, stageId });
-  await done(res, id);
+  await done(req, res, id);
 });
 
 api.post('/tasks/:id/responsible', async (req, res) => {
   const id = int(req.params.id);
+  const u = uid(req);
+  assertTaskAccess(u, id);
   const responsibleId = int(req.body?.responsibleId, 'responsibleId');
+  const current = q.get<{ responsible_id: number }>('SELECT responsible_id FROM tasks WHERE id = ?', id)?.responsible_id;
+  if (responsibleId !== current) assertEmployee(u, responsibleId); // назначать можно только своих сотрудников
   await callResult('tasks.task.update', { taskId: id, fields: { RESPONSIBLE_ID: responsibleId } });
-  await done(res, id);
+  await done(req, res, id);
 });
 
 const STATUS_ACTIONS: Record<string, string> = {
@@ -235,10 +272,11 @@ const STATUS_ACTIONS: Record<string, string> = {
 };
 api.post('/tasks/:id/status', async (req, res) => {
   const id = int(req.params.id);
+  assertTaskAccess(uid(req), id);
   const method = STATUS_ACTIONS[String(req.body?.action)];
   if (!method) throw new HttpError(400, 'Неизвестное действие');
   await callResult(method, { taskId: id });
-  await done(res, id);
+  await done(req, res, id);
 });
 
 /** Дата из UI: 'YYYY-MM-DD' -> начало/конец рабочего дня по Москве; ISO пропускаем как есть; '' — очистить */
@@ -253,6 +291,7 @@ function toB24(v: unknown, kind: 'start' | 'end'): string | undefined {
 
 api.patch('/tasks/:id/dates', async (req, res) => {
   const id = int(req.params.id);
+  assertTaskAccess(uid(req), id);
   const b = req.body || {};
   const fields: Record<string, string> = {};
   const dl = toB24(b.deadline, 'end');
@@ -273,7 +312,7 @@ api.patch('/tasks/:id/dates', async (req, res) => {
   }
   if (!Object.keys(fields).length) throw new HttpError(400, 'Нет полей для обновления');
   await callResult('tasks.task.update', { taskId: id, fields });
-  await done(res, id);
+  await done(req, res, id);
 });
 
 // ---------- Связи задач ----------
@@ -327,31 +366,30 @@ async function addPredecessor(id: number, pred: number) {
 api.post('/tasks/:id/deps', async (req, res) => {
   const id = int(req.params.id);
   const pred = int(req.body?.predecessorId, 'predecessorId');
+  assertTaskAccess(uid(req), id);
   await addPredecessor(id, pred);
   await refreshTask(pred).catch(() => null);
-  await done(res, id);
+  await done(req, res, id);
 });
 
 api.delete('/tasks/:id/deps/:pred', async (req, res) => {
   const id = int(req.params.id);
   const pred = int(req.params.pred, 'predecessorId');
+  assertTaskAccess(uid(req), id);
   const cur = await readPredecessors(id);
   if (cur.includes(pred)) await writePredecessors(id, cur.filter((x) => x !== pred));
   await refreshTask(pred).catch(() => null);
-  await done(res, id);
+  await done(req, res, id);
 });
 
 // ---------- Очереди ----------
-function queueFor(empId: number) {
-  const rows = q.all<any>(
-    `SELECT ${TASK_COLS} FROM tasks t WHERE t.responsible_id = ? AND t.status NOT IN (5,7)`, empId,
-  ).map(parseTask);
+function queueFor(userId: number, empId: number) {
+  const rows = selectTasks(userId, 't.responsible_id = ? AND t.status NOT IN (5,7)', empId);
   // Сначала по позиции в очереди; новые задачи — в конец: в работе, затем по дедлайну, на паузе/отложенные — последними
-  const { work, pause } = specialStages();
-  const isGroup = (t: any) => t.group_id === GROUP_ID;
+  const roles = stageRoles();
   const rank = (t: any) => {
-    if (isGroup(t) && work) return t.stage_id === work ? 0 : t.stage_id === pause ? 2 : 1;
-    return t.status === 3 ? 0 : t.status === 6 ? 2 : 1;
+    const st = taskState(t, roles);
+    return st.working ? 0 : st.paused ? 2 : 1;
   };
   return rows.sort((a, b) => {
     if (a.queue_pos != null && b.queue_pos != null) return a.queue_pos - b.queue_pos;
@@ -362,33 +400,38 @@ function queueFor(empId: number) {
   });
 }
 
-api.get('/queues', (_req, res) => {
-  const emps = q.all<any>('SELECT * FROM employees ORDER BY sort_order, name');
-  res.json(emps.map((e) => ({ employee: e, tasks: queueFor(e.id) })));
+api.get('/queues', (req, res) => {
+  const u = uid(req);
+  const emps = q.all<any>('SELECT * FROM employees WHERE user_id = ? ORDER BY sort_order, name', u);
+  res.json(emps.map((e) => ({ employee: e, tasks: queueFor(u, e.id) })));
 });
 
 api.put('/queues/:empId', (req, res) => {
   const empId = int(req.params.empId);
+  const u = uid(req);
+  assertEmployee(u, empId);
   const ids: number[] = (req.body?.taskIds || []).map(Number);
   q.tx(() => {
-    q.run('DELETE FROM queue WHERE employee_id = ?', empId);
-    ids.forEach((tid, i) => q.run('INSERT INTO queue(employee_id, task_id, position) VALUES(?,?,?)', empId, tid, i));
+    q.run('DELETE FROM queue WHERE user_id = ? AND employee_id = ?', u, empId);
+    ids.forEach((tid, i) => q.run('INSERT INTO queue(user_id, employee_id, task_id, position) VALUES(?,?,?,?)', u, empId, tid, i));
   });
-  res.json(queueFor(empId));
+  res.json(queueFor(u, empId));
 });
 
 // --- Построение цепочки (Гант) по очереди: рабочие дни, без выходных и отсутствий сотрудника ---
 api.post('/queues/:empId/plan', async (req, res) => {
   const empId = int(req.params.empId);
-  const s = getSettings();
+  const u = uid(req);
+  assertEmployee(u, empId);
+  const s = getSettings(u);
   const startStr = String(req.body?.startDate || todayYmd());
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr)) throw new HttpError(400, 'Некорректная дата начала');
   const include: number[] | undefined = req.body?.taskIds?.map(Number);
-  const { pause } = specialStages();
-  let tasks = queueFor(empId).filter((t) => t.status !== 6 && t.status !== 4 && !(t.group_id === GROUP_ID && pause && t.stage_id === pause));
+  const roles = stageRoles();
+  let tasks = queueFor(u, empId).filter((t) => t.status !== 6 && t.status !== 4 && !taskState(t, roles).paused);
   if (include) tasks = tasks.filter((t) => include.includes(t.id));
 
-  const skip = absentDays(empId);
+  const skip = absentDays(u, empId);
   let cursor = nextWorkday(startStr, skip);
   const plan = tasks.map((t) => {
     const dur = t.time_estimate > 0
@@ -426,14 +469,15 @@ api.post('/queues/:empId/plan', async (req, res) => {
     }
   }
   for (const p of plan) await refreshTask(p.taskId).catch(() => null);
-  runRules();
+  runRulesFor(u);
   res.json({ plan, errors, applied: true });
 });
 
 // ---------- Алерты ----------
 api.get('/alerts', (req, res) => {
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const u = uid(req);
+  const where: string[] = ['a.user_id = ?'];
+  const params: unknown[] = [u, u];
   if (req.query.unread === '1') where.push('a.read_at IS NULL');
   if (req.query.type) {
     const types = String(req.query.type).split(',');
@@ -445,34 +489,37 @@ api.get('/alerts', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 1000);
   res.json(q.all(
     `SELECT a.*, t.title AS task_title, t.responsible_name, t.status AS task_status, e.name AS employee_name
-     FROM alerts a LEFT JOIN tasks t ON t.id = a.task_id LEFT JOIN employees e ON e.id = a.employee_id
-     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ${limit}`,
+     FROM alerts a LEFT JOIN tasks t ON t.id = a.task_id LEFT JOIN employees e ON e.id = a.employee_id AND e.user_id = ?
+     WHERE ${where.join(' AND ')} ORDER BY a.id DESC LIMIT ${limit}`,
     ...params,
   ));
 });
 
-api.get('/alerts/count', (_req, res) => {
+api.get('/alerts/count', (req, res) => {
+  const u = uid(req);
   res.json({
-    unread: q.get<{ n: number }>('SELECT COUNT(*) AS n FROM alerts WHERE read_at IS NULL')!.n,
-    byType: q.all('SELECT type, COUNT(*) AS n FROM alerts WHERE read_at IS NULL GROUP BY type'),
+    unread: q.get<{ n: number }>('SELECT COUNT(*) AS n FROM alerts WHERE user_id = ? AND read_at IS NULL', u)!.n,
+    byType: q.all('SELECT type, COUNT(*) AS n FROM alerts WHERE user_id = ? AND read_at IS NULL GROUP BY type', u),
   });
 });
 
 api.post('/alerts/read', (req, res) => {
   const now = new Date().toISOString();
+  const u = uid(req);
   const ids: number[] | undefined = req.body?.ids;
-  if (ids?.length) q.run(`UPDATE alerts SET read_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`, now, ...ids.map(Number));
-  else if (req.body?.taskId) q.run('UPDATE alerts SET read_at = ? WHERE task_id = ? AND read_at IS NULL', now, Number(req.body.taskId));
-  else if (req.body?.all) q.run('UPDATE alerts SET read_at = ? WHERE read_at IS NULL', now);
+  if (ids?.length) q.run(`UPDATE alerts SET read_at = ? WHERE user_id = ? AND id IN (${ids.map(() => '?').join(',')})`, now, u, ...ids.map(Number));
+  else if (req.body?.taskId) q.run('UPDATE alerts SET read_at = ? WHERE user_id = ? AND task_id = ? AND read_at IS NULL', now, u, Number(req.body.taskId));
+  else if (req.body?.all) q.run('UPDATE alerts SET read_at = ? WHERE user_id = ? AND read_at IS NULL', now, u);
   res.json({ ok: true });
 });
 
 // ---------- Настройки и синхронизация ----------
-api.get('/settings', (_req, res) => res.json(getSettings()));
+api.get('/settings', (req, res) => res.json({ ...getSettings(uid(req)), ...getGlobalSettings(), canEditGlobal: isAdmin(req) }));
 api.put('/settings', (req, res) => {
-  saveSettings(req.body || {});
-  runRules();
-  res.json(getSettings());
+  const mine = saveSettings(uid(req), req.body || {});
+  const global = isAdmin(req) ? saveGlobalSettings(req.body || {}) : getGlobalSettings();
+  runRulesFor(uid(req));
+  res.json({ ...mine, ...global, canEditGlobal: isAdmin(req) });
 });
 api.post('/sync', async (req, res) => {
   await runSync({ full: !!req.body?.full });
@@ -481,9 +528,13 @@ api.post('/sync', async (req, res) => {
 
 // ---------- SSE ----------
 api.get('/events', (req: Request, res: Response) => {
+  const u = uid(req);
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   res.write(': ok\n\n');
-  const onEvent = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+  const onEvent = (e: any) => {
+    if (e?.type === 'alert' && e.alert?.user_id !== u) return; // чужие алерты не отправляем
+    res.write(`data: ${JSON.stringify(e)}\n\n`);
+  };
   bus.on('event', onEvent);
   const ping = setInterval(() => res.write(': ping\n\n'), 25000);
   req.on('close', () => {
@@ -492,4 +543,4 @@ api.get('/events', (req: Request, res: Response) => {
   });
 });
 
-export { HttpError };
+export { HttpError, ScopeError };

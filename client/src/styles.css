@@ -19,27 +19,26 @@
   --radius: 8px;
   color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #15181c;
-    --surface: #1d2126;
-    --surface-2: #23282e;
-    --border: #30363d;
-    --text: #e6e9ec;
-    --muted: #8d98a3;
-    --accent: #5b8ff9;
-    --accent-soft: #1f2d4a;
-    --ok: #4cc06e;
-    --ok-soft: #1c3324;
-    --warn: #e0a030;
-    --warn-soft: #3a2e14;
-    --danger: #f06262;
-    --danger-soft: #3d1f1f;
-    --info-soft: #262c33;
-    --arrow: #8d98a3;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-    color-scheme: dark;
-  }
+/* Тёмная тема: data-theme ставит скрипт в index.html и переключатель в шапке (авто = как в системе) */
+:root[data-theme="dark"] {
+  --bg: #15181c;
+  --surface: #1d2126;
+  --surface-2: #23282e;
+  --border: #30363d;
+  --text: #e6e9ec;
+  --muted: #8d98a3;
+  --accent: #5b8ff9;
+  --accent-soft: #1f2d4a;
+  --ok: #4cc06e;
+  --ok-soft: #1c3324;
+  --warn: #e0a030;
+  --warn-soft: #3a2e14;
+  --danger: #f06262;
+  --danger-soft: #3d1f1f;
+  --info-soft: #262c33;
+  --arrow: #8d98a3;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -521,7 +520,7 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .rich-content code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.9em; background: var(--info-soft); padding: 1px 5px; border-radius: 4px; }
 .rich-content pre { margin: 0 0 0.5em; padding: 10px 12px; background: #1d2329; color: #e6e9ec; border-radius: 6px; overflow-x: auto; font-size: 12.5px; }
 .rich-content pre code { background: none; padding: 0; color: inherit; }
-.rich-content mark { background: #ffe58a; color: inherit; padding: 0 2px; border-radius: 2px; }
+.rich-content mark { background: #ffe58a; color: #1d2329; padding: 0 2px; border-radius: 2px; }
 .rich-content hr { border: 0; border-top: 1px solid var(--border); margin: 0.8em 0; }
 .rich-content a { color: var(--accent); text-decoration: underline; }
 
@@ -529,7 +528,47 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .login-logo { width: 44px; height: 44px; margin: 0 auto -4px; display: block; }
 .login-card .link.center { align-self: center; font-size: 13px; }
 .login-card code { display: inline-block; margin: 4px 0; }
-.topbar-user { font-size: 13px; color: var(--muted); white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .settings-row { margin-top: 16px; }
 .user-new { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 6px; }
 .user-new input { flex: 1 1 140px; }
+
+/* ---------- Отделы ---------- */
+.dep-dot { display: inline-block; flex: none; border-radius: 50%; }
+.dep-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.dep-tab { --dep: var(--accent); display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 13.5px; padding: 6px 14px; border-radius: 18px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+.dep-tab:hover { border-color: var(--dep); }
+.dep-tab.active { border-color: var(--dep); background: color-mix(in srgb, var(--dep) 14%, var(--surface)); font-weight: 600; box-shadow: inset 0 -2px 0 var(--dep); }
+.dep-tab.add { color: var(--muted); border-style: dashed; background: transparent; }
+.dep-title { display: inline-flex; align-items: center; gap: 10px; }
+.dep-modal { width: min(560px, 100%); }
+.onboarding { max-width: 640px; margin: 24px auto; }
+.onboarding h2 { margin-top: 0; }
+
+/* Карточка задачи: цвет отдела — полоса слева и плашка */
+.task-card.has-dep { border-left: 4px solid var(--dep); padding-left: 8px; }
+.chip.dep-chip { --dep: var(--accent); background: color-mix(in srgb, var(--dep) 16%, transparent); color: var(--text); box-shadow: inset 2px 0 0 var(--dep); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.task-card-top .dep-chip { margin-left: auto; }
+.task-card-top .unread-dot + .dep-chip, .task-card-top .unread-dot ~ .group-chip { margin-left: 4px; }
+.drawer .task-id .dep-chip { margin-left: 8px; }
+
+/* Кабинет: отделы */
+.split-wide { grid-template-columns: 1fr 1fr; }
+@media (max-width: 1000px) { .split-wide { grid-template-columns: 1fr; } }
+.dep-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); }
+.dep-row-main { flex: 1; min-width: 0; }
+.dep-edit { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.dep-add { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px dashed var(--border); border-radius: 8px; }
+.dep-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.dep-suggest .chip { cursor: pointer; border: 1px solid var(--border); font: inherit; font-size: 12px; }
+.dep-suggest .chip:hover { border-color: var(--accent); }
+.swatch-custom { width: 26px; height: 22px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
+
+/* Шапка: тема, роль */
+.theme-toggle { font-size: 15px; min-width: 32px; justify-content: center; }
+.topbar-user { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; text-decoration: none !important; }
+.topbar-user:hover { color: var(--text); }
+.role-chip { font-size: 10.5px; line-height: 16px; }
+.link-code { word-break: break-all; display: inline; margin: 0 4px; }
+
+/* Гант: цвет отдела — полоса слева на баре */
+.gantt-bar.has-dep { border-left: 5px solid var(--dep); }

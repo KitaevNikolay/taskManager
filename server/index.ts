@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { authApi, authErrors, mailConfigured, requireAuth, usersApi } from './auth.ts';
 import { q } from './db.ts';
-import { api, HttpError } from './routes.ts';
+import { api, HttpError, ScopeError } from './routes.ts';
 import { BitrixError } from './bitrix.ts';
 import { startSyncLoop } from './sync.ts';
 
@@ -29,7 +29,7 @@ app.use('/api', authErrors);
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Не найдено' }));
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof HttpError || err instanceof ScopeError) return res.status(err.status).json({ error: err.message });
   if (err instanceof BitrixError) return res.status(502).json({ error: `Битрикс24: ${err.message}`, code: err.code });
   console.error(err);
   res.status(500).json({ error: err?.message || 'Внутренняя ошибка' });

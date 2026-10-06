@@ -3,43 +3,52 @@ import {
   DndContext, DragOverlay, PointerSensor, useDraggable, useDroppable, useSensor, useSensors,
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core';
-import { api, deadlineState, type Task } from '../api';
+import { api, deadlineState, stagesOf, type Department, type Task } from '../api';
 import { useApp } from '../App';
 import { Avatar, TaskCard } from '../components/TaskCard';
 import { AbsenceBadge } from '../components/AbsenceBadge';
+import { DepartmentAdd, DepartmentDot } from '../components/Departments';
 import type { Employee } from '../api';
 
 interface Column { id: string; title: string; color?: string; match: (t: Task) => boolean }
 
 const OTHER_COL = 'other';
 
-const readEmployeeFromHash = () => Number(new URLSearchParams(window.location.hash.split('?')[1] || '').get('employee')) || null;
+const hashParam = (k: string) => Number(new URLSearchParams(window.location.hash.split('?')[1] || '').get(k)) || null;
 
 export function KanbanPage() {
-  const { meta, employees } = useApp();
-  const [employeeId, setEmployeeId] = useState<number | null>(readEmployeeFromHash);
+  const { employees, meta } = useApp();
+  const [employeeId, setEmployeeId] = useState<number | null>(() => hashParam('employee'));
+  const [groupId, setGroupId] = useState<number | null>(() => hashParam('dep'));
 
-  const selectEmployee = (id: number | null) => {
-    setEmployeeId(id);
-    window.history.replaceState(null, '', id ? `#/kanban?employee=${id}` : '#/kanban');
+  const syncHash = (dep: number | null, emp: number | null) => {
+    const p = new URLSearchParams();
+    if (dep) p.set('dep', String(dep));
+    if (emp) p.set('employee', String(emp));
+    window.history.replaceState(null, '', `#/kanban${p.toString() ? '?' + p : ''}`);
   };
+  const selectEmployee = (id: number | null) => { setEmployeeId(id); syncHash(groupId, id); };
+  const selectGroup = (g: number) => { setGroupId(g); syncHash(g, employeeId); };
 
   useEffect(() => {
-    const h = () => setEmployeeId(readEmployeeFromHash());
+    const h = () => { setEmployeeId(hashParam('employee')); setGroupId(hashParam('dep')); };
     window.addEventListener('hashchange', h);
     return () => window.removeEventListener('hashchange', h);
   }, []);
 
   const currentEmp = employees.find((e) => e.id === employeeId);
+  const dep = meta?.departments.find((d) => d.group_id === groupId) || meta?.departments[0];
   return (
     <div className="page page-wide">
       <TaskBoard
         employeeId={employeeId}
+        groupId={dep?.group_id ?? null}
+        onSelectGroup={selectGroup}
         onSelectEmployee={selectEmployee}
-        title={currentEmp ? `Задачи: ${currentEmp.name}` : 'Канбан отдела'}
+        title={currentEmp ? `Задачи: ${currentEmp.name}` : dep ? dep.title : 'Канбан'}
         selector={
           <select value={employeeId ?? ''} onChange={(e) => selectEmployee(e.target.value ? Number(e.target.value) : null)}>
-            <option value="">Отдел (группа {meta?.groupId})</option>
+            <option value="">Все задачи отдела</option>
             {employees.map((e) => <option key={e.id} value={e.id}>{e.name}{e.is_buffer ? ' (буфер)' : ''}</option>)}
           </select>
         }
@@ -48,16 +57,50 @@ export function KanbanPage() {
   );
 }
 
+/** Вкладки отделов + добавление нового отдела */
+export function DepartmentTabs({ active, onSelect }: { active: number | null; onSelect: (groupId: number) => void }) {
+  const { meta, reloadMeta, bump } = useApp();
+  const [adding, setAdding] = useState(false);
+  const deps = meta?.departments || [];
+  return (
+    <>
+      <div className="dep-tabs">
+        {deps.map((d) => (
+          <button key={d.id} className={`dep-tab ${d.group_id === active ? 'active' : ''}`} style={{ ['--dep' as string]: d.color }} onClick={() => onSelect(d.group_id)}>
+            <DepartmentDot color={d.color} />
+            {d.title}
+          </button>
+        ))}
+        <button className="dep-tab add" onClick={() => setAdding(true)} title="Добавить отдел (группу Битрикс24)">+ Отдел</button>
+      </div>
+      {adding && (
+        <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setAdding(false)}>
+          <div className="modal card dep-modal">
+            <h2>Новый отдел</h2>
+            <DepartmentAdd
+              onAdded={(d: Department) => { setAdding(false); reloadMeta(); bump(); onSelect(d.group_id); }}
+              onCancel={() => setAdding(false)}
+            />
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 interface BoardProps {
-  /** null — канбан группы отдела, иначе все задачи сотрудника */
+  /** null — канбан отдела, иначе все задачи сотрудника */
   employeeId: number | null;
+  /** Отдел (группа Б24), по стадиям которого строятся колонки */
+  groupId: number | null;
+  onSelectGroup: (groupId: number) => void;
   onSelectEmployee: (id: number | null) => void;
   title: ReactNode;
   selector?: ReactNode;
 }
 
-/** Канбан по стадиям группы + панель сотрудников для назначения перетаскиванием */
-export function TaskBoard({ employeeId, onSelectEmployee, title, selector }: BoardProps) {
+/** Канбан по стадиям группы отдела + панель сотрудников для назначения перетаскиванием */
+export function TaskBoard({ employeeId, groupId, onSelectGroup, onSelectEmployee, title, selector }: BoardProps) {
   const { meta, employees, version, toast, bump, warnHours } = useApp();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,26 +109,34 @@ export function TaskBoard({ employeeId, onSelectEmployee, title, selector }: Boa
   const [showDone, setShowDone] = useState(false);
   const [dragged, setDragged] = useState<Task | null>(null);
   const [highlight, setHighlight] = useState<number | null>(null);
+  const dep = meta?.departments.find((d) => d.group_id === groupId) || null;
 
-  useEffect(() => setHighlight(null), [employeeId]);
+  useEffect(() => setHighlight(null), [employeeId, groupId]);
 
   useEffect(() => {
-    const url = employeeId ? `/tasks?scope=employee&employeeId=${employeeId}` : '/tasks?scope=group';
-    api.get<Task[]>(url).then((t) => { setTasks(t); setLoading(false); }).catch((e) => toast(e.message, 'error'));
-  }, [employeeId, version, toast]);
+    if (!employeeId && !groupId) { setTasks([]); setLoading(false); return; }
+    const url = employeeId ? `/tasks?scope=employee&employeeId=${employeeId}` : `/tasks?scope=department&groupId=${groupId}`;
+    setLoading(true);
+    api.get<Task[]>(url).then((t) => { setTasks(t); setLoading(false); }).catch((e) => { toast(e.message, 'error'); setLoading(false); });
+  }, [employeeId, groupId, version, toast]);
 
-  // Колонки — стадии канбана группы отдела. В режиме сотрудника его задачи из других групп — в отдельной колонке.
+  // Колонки — стадии канбана выбранного отдела. В режиме сотрудника его задачи из других групп — в отдельной колонке.
   const columns: Column[] = useMemo(() => {
-    const stages = meta?.stages || [];
-    const first = stages[0]?.id;
-    const inGroup = (t: Task) => t.group_id === meta?.groupId;
-    const cols: Column[] = stages.map((s) => ({
-      id: `g${s.id}`, title: s.title, color: s.color,
-      match: (t: Task) => inGroup(t) && (t.stage_id === s.id || (s.id === first && !stages.some((x) => x.id === t.stage_id))),
-    }));
-    if (employeeId) cols.push({ id: OTHER_COL, title: 'Другие группы', color: 'a0a8b0', match: (t) => !inGroup(t) });
+    const stages = stagesOf(meta, groupId);
+    const inGroup = (t: Task) => t.group_id === groupId;
+    let cols: Column[];
+    if (stages.length) {
+      const first = stages[0].id;
+      cols = stages.map((s) => ({
+        id: `g${s.id}`, title: s.title, color: s.color,
+        match: (t: Task) => inGroup(t) && (t.stage_id === s.id || (s.id === first && !stages.some((x) => x.id === t.stage_id))),
+      }));
+    } else {
+      cols = groupId ? [{ id: 'nostage', title: 'Задачи (в группе нет канбана)', color: 'a0a8b0', match: inGroup }] : [];
+    }
+    if (employeeId) cols.push({ id: OTHER_COL, title: groupId ? 'Другие отделы и группы' : 'Задачи', color: 'a0a8b0', match: (t) => !inGroup(t) });
     return cols;
-  }, [employeeId, meta]);
+  }, [employeeId, groupId, meta]);
 
   const visible = tasks.filter((t) => {
     if (!showDone && (t.status === 5 || t.status === 7)) return false;
@@ -117,8 +168,8 @@ export function TaskBoard({ employeeId, onSelectEmployee, title, selector }: Boa
         await api.post(`/tasks/${task.id}/responsible`, { responsibleId: respId });
         toast(`#${task.id} назначена: ${emp?.name}`, 'ok');
       } else if (over.startsWith('g')) {
-        if (task.group_id !== meta?.groupId) {
-          toast('Задача не в группе отдела — её стадии в другом канбане', 'error');
+        if (task.group_id !== groupId) {
+          toast('Задача из другой группы — её стадии в другом канбане', 'error');
           return;
         }
         const stageId = Number(over.slice(1));
@@ -135,10 +186,21 @@ export function TaskBoard({ employeeId, onSelectEmployee, title, selector }: Boa
     }
   };
 
+  if (meta && !meta.departments.length && !employeeId) {
+    return (
+      <div className="card onboarding">
+        <h2>Добавьте первый отдел</h2>
+        <p className="muted">Отдел — это группа (проект) Битрикс24. Канбан строится по её стадиям, а задачи отдела отмечаются его цветом. Отделов может быть несколько — между ними можно переключаться.</p>
+        <DepartmentAdd onAdded={(d) => onSelectGroup(d.group_id)} />
+      </div>
+    );
+  }
+
   return (
     <>
+      <DepartmentTabs active={groupId} onSelect={onSelectGroup} />
       <div className="page-head">
-        <h1>{title}</h1>
+        <h1 className="dep-title">{dep && <DepartmentDot color={dep.color} size={12} />}{title}</h1>
         <div className="toolbar">
           {selector}
           <input className="search" placeholder="Поиск: название, ID, исполнитель, #тег" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -146,7 +208,11 @@ export function TaskBoard({ employeeId, onSelectEmployee, title, selector }: Boa
           <label className="check"><input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} /> Закрытые</label>
         </div>
       </div>
-      {employeeId && <p className="muted small page-note">Все задачи сотрудника. Задачи из других групп — в последней колонке, на карточке указана их стадия.</p>}
+      {employeeId && (
+        <p className="muted small page-note">
+          Все задачи сотрудника. Колонки — стадии отдела «{dep?.title || '—'}»; задачи других отделов и групп — в последней колонке, с их стадией и отделом.
+        </p>
+      )}
 
       <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={() => setDragged(null)}>
         <div className="kanban-layout">
@@ -207,7 +273,7 @@ function DraggableCard({ task, dimmed, showResponsible, showStage }: { task: Tas
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: task.id });
   return (
     <div ref={setNodeRef} style={{ opacity: isDragging ? 0.35 : dimmed ? 0.3 : 1 }}>
-      <TaskCard task={task} showResponsible={showResponsible} showStage={showStage} dragHandleProps={{ ...attributes, ...listeners }} />
+      <TaskCard task={task} showResponsible={showResponsible} showStage={showStage} showDepartment={showStage} dragHandleProps={{ ...attributes, ...listeners }} />
     </div>
   );
 }

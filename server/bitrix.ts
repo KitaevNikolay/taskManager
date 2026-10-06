@@ -5,7 +5,7 @@ const WEBHOOK = (process.env.BITRIX_TASK_WEBHOOK || '').replace(/\/+$/, '');
 if (!WEBHOOK) throw new Error('BITRIX_TASK_WEBHOOK не задан в .env');
 
 export const PORTAL_URL = new URL(WEBHOOK).origin;
-export const GROUP_ID = Number(process.env.BITRIX_GROUP || 0);
+
 
 export class BitrixError extends Error {
   constructor(public code: string, message: string) {

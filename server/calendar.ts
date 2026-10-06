@@ -39,6 +39,7 @@ export function workdaysIn(from: string, to: string): string[] {
 
 export interface Absence {
   id: number;
+  user_id: number;
   employee_id: number;
   type: 'vacation' | 'dayoff' | 'sick';
   date_from: string;
@@ -48,19 +49,19 @@ export interface Absence {
 
 export const ABSENCE_NAMES: Record<string, string> = { vacation: 'Отпуск', dayoff: 'Отгул', sick: 'Больничный' };
 
-export const absencesOf = (empId: number) =>
-  q.all<Absence>('SELECT * FROM absences WHERE employee_id = ? ORDER BY date_from', empId);
+export const absencesOf = (userId: number, empId: number) =>
+  q.all<Absence>('SELECT * FROM absences WHERE user_id = ? AND employee_id = ? ORDER BY date_from', userId, empId);
 
 /** Множество дней, когда сотрудник отсутствует */
-export function absentDays(empId: number, list = absencesOf(empId)): Set<string> {
+export function absentDays(userId: number, empId: number, list = absencesOf(userId, empId)): Set<string> {
   const set = new Set<string>();
   for (const a of list) for (const d of daysIn(a.date_from, a.date_to)) set.add(d);
   return set;
 }
 
 /** Отсутствие сотрудника на дату (или null) */
-export function absenceOn(empId: number, ymd: string): Absence | null {
-  return q.get<Absence>('SELECT * FROM absences WHERE employee_id = ? AND date_from <= ? AND date_to >= ? LIMIT 1', empId, ymd, ymd) || null;
+export function absenceOn(userId: number, empId: number, ymd: string): Absence | null {
+  return q.get<Absence>('SELECT * FROM absences WHERE user_id = ? AND employee_id = ? AND date_from <= ? AND date_to >= ? LIMIT 1', userId, empId, ymd, ymd) || null;
 }
 
 const isOff = (d: string, skip?: Set<string>) => isWeekend(d) || !!skip?.has(d);

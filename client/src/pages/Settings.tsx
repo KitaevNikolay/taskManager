@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { api, fmtDateTime } from '../api';
 import { useApp } from '../App';
 import { NotifySettings } from '../components/NotifySettings';
-import { UsersSettings } from '../components/UsersSettings';
+import { ProfileSettings, UsersAdmin } from '../components/UsersSettings';
+import { DepartmentsSettings } from '../components/Departments';
 
 const FIELDS = [
   { key: 'staleDays', label: 'Задача «висит» на сотруднике, дней', hint: 'Алерт, если задача на одном ответственном дольше этого срока' },
@@ -11,21 +12,23 @@ const FIELDS = [
   { key: 'doneVisibleDays', label: 'Показывать закрытые задачи, дней', hint: 'На канбане и в списках' },
   { key: 'defaultTaskDays', label: 'Длительность задачи без оценки, раб. дней', hint: 'Для построения цепочки в Ганте' },
   { key: 'workdayHours', label: 'Рабочих часов в дне', hint: 'Перевод оценки времени задачи в дни' },
-  { key: 'syncIntervalSec', label: 'Интервал синхронизации, сек', hint: 'Не меньше 15 — у Битрикс24 есть лимит на число запросов' },
 ] as const;
 
 export function SettingsPage() {
-  const { meta, toast, bump } = useApp();
+  const { meta, toast, bump, isAdmin } = useApp();
   const [s, setS] = useState<Record<string, number> | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => void api.get<Record<string, number>>('/settings').then(setS), []);
+  useEffect(() => {
+    if (location.hash.includes('departments')) document.getElementById('departments')?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
   if (!s) return null;
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      setS(await api.put('/settings', { ...s, syncIntervalSec: Math.max(15, s.syncIntervalSec) }));
+      setS(await api.put('/settings', s));
       toast('Настройки сохранены', 'ok');
     } catch (err: any) {
       toast(err.message, 'error');
@@ -47,10 +50,15 @@ export function SettingsPage() {
 
   return (
     <div className="page">
-      <div className="page-head"><h1>Настройки</h1></div>
-      <div className="split">
+      <div className="page-head"><h1>Личный кабинет</h1></div>
+      <div className="split split-wide">
+        <DepartmentsSettings />
+        <ProfileSettings />
+      </div>
+
+      <div className="split settings-row">
         <form className="card form" onSubmit={save}>
-          <h3>Правила алертов и планирования</h3>
+          <h3>Мои правила алертов и планирования</h3>
           {FIELDS.map((f) => (
             <label key={f.key} className="field">
               <span>{f.label}</span>
@@ -62,25 +70,36 @@ export function SettingsPage() {
         </form>
 
         <div className="stack">
-        <NotifySettings />
-        <div className="card form">
-          <h3>Синхронизация с Битрикс24</h3>
-          <div className="kv">
-            <div className="k">Портал</div><div className="v"><a href={meta?.portalUrl} target="_blank" rel="noreferrer">{meta?.portalUrl}</a></div>
-            <div className="k">Группа отдела</div><div className="v">{meta?.groupId}</div>
-            <div className="k">Стадии канбана</div><div className="v">{meta?.stages.map((st) => st.title).join(' → ')}</div>
-            <div className="k">Последняя синхр.</div><div className="v">{fmtDateTime(meta?.sync.lastSyncAt)}</div>
-            {meta?.sync.lastError && (<><div className="k">Ошибка</div><div className="v danger-text">{meta.sync.lastError}</div></>)}
+          <NotifySettings />
+          <div className="card form">
+            <h3>Синхронизация с Битрикс24</h3>
+            <div className="kv">
+              <div className="k">Портал</div><div className="v"><a href={meta?.portalUrl} target="_blank" rel="noreferrer">{meta?.portalUrl}</a></div>
+              <div className="k">Последняя синхр.</div><div className="v">{fmtDateTime(meta?.sync.lastSyncAt)}</div>
+              {meta?.sync.lastError && (<><div className="k">Ошибка</div><div className="v danger-text">{meta.sync.lastError}</div></>)}
+              <div className="k">Интервал</div>
+              <div className="v">
+                {isAdmin ? (
+                  <form className="row" onSubmit={save}>
+                    <input type="number" min={15} value={s.syncIntervalSec} onChange={(e) => setS({ ...s, syncIntervalSec: Number(e.target.value) })} style={{ width: 90 }} />
+                    <span className="muted small">сек (не меньше 15)</span>
+                    <button className="btn sm">OK</button>
+                  </form>
+                ) : (
+                  <span>{s.syncIntervalSec} сек <span className="muted small">— меняет администратор</span></span>
+                )}
+              </div>
+            </div>
+            <button className="btn" onClick={sync} disabled={busy}>{busy ? 'Синхронизация…' : 'Полная синхронизация'}</button>
+            <p className="muted small">
+              Изменения подтягиваются опросом Битрикс24. Свои действия из этой админки (вебхук) в алертах не дублируются.
+              Комментарии в чатах задач определяются по активности задачи: текст сообщения недоступен без скоупа <code>im</code>.
+            </p>
           </div>
-          <button className="btn" onClick={sync} disabled={busy}>{busy ? 'Синхронизация…' : 'Полная синхронизация'}</button>
-          <p className="muted small">
-            Изменения подтягиваются опросом Битрикс24. Свои действия из этой админки (вебхук) в алертах не дублируются.
-            Комментарии в чатах задач определяются по активности задачи: текст сообщения недоступен без скоупа <code>im</code>.
-          </p>
-        </div>
         </div>
       </div>
-      <UsersSettings />
+
+      {isAdmin && <UsersAdmin />}
     </div>
   );
 }

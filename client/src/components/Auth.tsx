@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api';
 
 export interface AuthStatus {
-  user: { id: number; login: string; name: string | null; email: string | null } | null;
+  user: { id: number; login: string; name: string | null; email: string | null; role: 'admin' | 'user'; theme: 'auto' | 'light' | 'dark' } | null;
   needsSetup: boolean;
   noUsers?: boolean;
   mailConfigured: boolean;

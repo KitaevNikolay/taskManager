@@ -71,6 +71,8 @@ export interface Task {
   is_employee: boolean;
   /** Оповещения по задаче: on — всегда, off — никогда, null — по общим правилам */
   notify: 'on' | 'off' | null;
+  /** Отдел пользователя, в группе которого задача (если есть) */
+  department_id: number | null;
 }
 
 export interface Alert {
@@ -88,14 +90,28 @@ export interface Alert {
   employee_name?: string;
 }
 
+/** Отдел пользователя — группа Б24 со своим канбаном */
+export interface Department {
+  id: number;
+  group_id: number;
+  title: string;
+  color: string;
+  sort_order: number;
+  open_count?: number;
+  stages_count?: number;
+}
+
 export interface Meta {
   portalUrl: string;
-  groupId: number;
   selfUserId: number;
-  stages: Stage[];
+  departments: Department[];
   allStages: Stage[];
-  workStageId: number | null;
-  pauseStageId: number | null;
+  /** Стадии «в работе» / «на паузе» во всех группах (по названию стадии) */
+  workStageIds: number[];
+  pauseStageIds: number[];
+  /** Группы, где «в работе» определяется стадией, а не статусом */
+  groupsWithWork: number[];
+  workByGroup: Record<number, number>;
   statusNames: Record<number, string>;
   sync: { running: boolean; lastSyncAt: string | null; lastError: string | null };
 }
@@ -178,3 +194,19 @@ export const isWeekend = (ymd: string) => [0, 6].includes(new Date(ymd + 'T00:00
 export const daysCount = (from: string, to: string) => Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 86400e3) + 1;
 export const fmtYmd = (ymd: string) => ymd.split('-').reverse().join('.');
 export const fmtYmdShort = (ymd: string) => ymd.slice(8, 10) + '.' + ymd.slice(5, 7);
+
+// ---------- Отделы и стадии ----------
+export const stagesOf = (meta: Meta | null, groupId: number | null | undefined) =>
+  (meta?.allStages || []).filter((s) => s.entity_id === groupId).sort((a, b) => a.sort - b.sort);
+
+export const departmentOf = (meta: Meta | null, t: Pick<Task, 'group_id'>) =>
+  meta?.departments.find((d) => d.group_id === t.group_id) || null;
+
+/** «В работе» / «на паузе»: в группах с такими стадиями — по стадии, иначе по статусу задачи */
+export function taskState(meta: Meta | null, t: Pick<Task, 'group_id' | 'stage_id' | 'status'>) {
+  const byStage = !!meta && t.group_id != null && meta.groupsWithWork.includes(t.group_id);
+  return {
+    working: byStage ? meta!.workStageIds.includes(t.stage_id ?? -1) : t.status === 3,
+    paused: byStage ? meta!.pauseStageIds.includes(t.stage_id ?? -1) : t.status === 6,
+  };
+}

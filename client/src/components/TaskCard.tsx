@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from 'react';
-import { daysSince, deadlineState, fmtDate, type Task } from '../api';
+import { daysSince, deadlineState, departmentOf, fmtDate, type Task } from '../api';
 import { useApp } from '../App';
 
 export function Avatar({ name, icon, size = 22 }: { name: string | null; icon?: string | null; size?: number }) {
@@ -49,20 +49,22 @@ interface Props {
   task: Task;
   showResponsible?: boolean;
   showStage?: boolean;
+  /** Плашка с названием отдела (на канбане одного отдела не нужна — там только цветная полоса) */
+  showDepartment?: boolean;
   extra?: ReactNode;
   style?: CSSProperties;
   dragHandleProps?: Record<string, unknown>;
   className?: string;
 }
 
-export function TaskCard({ task, showResponsible = true, showStage, extra, style, dragHandleProps, className = '' }: Props) {
+export function TaskCard({ task, showResponsible = true, showStage, showDepartment = true, extra, style, dragHandleProps, className = '' }: Props) {
   const { openTask, meta } = useApp();
   const onEmp = daysSince(task.responsible_since);
-  const outside = meta && task.group_id !== meta.groupId;
+  const dep = departmentOf(meta, task);
   return (
     <div
-      className={`task-card ${task.status === 5 ? 'done' : ''} ${className}`}
-      style={style}
+      className={`task-card ${task.status === 5 ? 'done' : ''} ${dep ? 'has-dep' : ''} ${className}`}
+      style={dep ? { ...style, ['--dep' as string]: dep.color } : style}
       onClick={() => openTask(task.id)}
       {...dragHandleProps}
     >
@@ -71,7 +73,11 @@ export function TaskCard({ task, showResponsible = true, showStage, extra, style
         {task.unread_alerts > 0 && <span className="unread-dot" title={`Непрочитанных алертов: ${task.unread_alerts}`} />}
         {task.notify === 'on' && <span className="notify-mark" title="Оповещения по задаче: всегда">🔔</span>}
         {task.notify === 'off' && <span className="notify-mark" title="Оповещения по задаче: никогда">🔕</span>}
-        {outside && <span className="chip muted group-chip" title={task.group_name || 'Без группы'}>{task.group_name || 'без группы'}</span>}
+        {dep ? (
+          showDepartment && <span className="chip dep-chip" title={`Отдел: ${dep.title}`}>{dep.title}</span>
+        ) : (
+          <span className="chip muted group-chip" title={task.group_name ? `Группа вне ваших отделов: ${task.group_name}` : 'Без группы'}>{task.group_name || 'без группы'}</span>
+        )}
       </div>
       <div className="task-title">{task.title}</div>
       {task.tags?.length > 0 && <div className="task-tags"><Tags tags={task.tags} /></div>}

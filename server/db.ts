@@ -9,8 +9,10 @@ export const db = new DatabaseSync(dbPath);
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
 db.exec(`
+-- Сотрудники — свои у каждого пользователя приложения (один человек Б24 может быть у нескольких)
 CREATE TABLE IF NOT EXISTS employees (
-  id INTEGER PRIMARY KEY,            -- ID пользователя в Б24
+  user_id INTEGER NOT NULL DEFAULT 0,      -- владелец (пользователь приложения)
+  id INTEGER NOT NULL,                     -- ID пользователя в Б24
   name TEXT NOT NULL,
   department TEXT,
   email TEXT,
@@ -19,7 +21,20 @@ CREATE TABLE IF NOT EXISTS employees (
   sort_order INTEGER NOT NULL DEFAULT 0,   -- порядок на экране
   is_buffer INTEGER NOT NULL DEFAULT 0,    -- буфер: на него сначала ставятся задачи, потом распределяются
   dayoff_granted REAL NOT NULL DEFAULT 0,  -- выдано дней отгула (использованные считаются по absences)
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, id)
+);
+
+-- Отделы пользователя: группы Б24, по стадиям которых строится канбан
+CREATE TABLE IF NOT EXISTS departments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL DEFAULT 0,
+  group_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  color TEXT NOT NULL DEFAULT '#2f6fed',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (user_id, group_id)
 );
 
 CREATE TABLE IF NOT EXISTS stages (
@@ -64,18 +79,21 @@ CREATE INDEX IF NOT EXISTS idx_tasks_resp ON tasks(responsible_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_group ON tasks(group_id);
 
 CREATE TABLE IF NOT EXISTS queue (
+  user_id INTEGER NOT NULL DEFAULT 0,
   employee_id INTEGER NOT NULL,
   task_id INTEGER NOT NULL,
   position INTEGER NOT NULL,
-  PRIMARY KEY (employee_id, task_id)
+  PRIMARY KEY (user_id, employee_id, task_id)
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  dedupe_key TEXT UNIQUE,
+  user_id INTEGER NOT NULL DEFAULT 0,      -- кому адресован алерт
+  dedupe_key TEXT UNIQUE,                  -- u<user_id>:<ключ>
   type TEXT NOT NULL,                      -- change | comment | stale | idle | deadline_soon | overdue | assigned
   task_id INTEGER,
   employee_id INTEGER,
+  note_id INTEGER,
   title TEXT NOT NULL,
   message TEXT,
   author TEXT,
@@ -86,6 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
 
 CREATE TABLE IF NOT EXISTS absences (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL DEFAULT 0,
   employee_id INTEGER NOT NULL,
   type TEXT NOT NULL,                      -- vacation | dayoff | sick
   date_from TEXT NOT NULL,                 -- YYYY-MM-DD включительно
@@ -106,13 +125,16 @@ CREATE TABLE IF NOT EXISTS absence_shifts (
 
 -- Оповещения в браузере: индивидуальная настройка задачи (on — всегда, off — никогда)
 CREATE TABLE IF NOT EXISTS task_notify (
-  task_id INTEGER PRIMARY KEY,
-  mode TEXT NOT NULL
+  user_id INTEGER NOT NULL DEFAULT 0,
+  task_id INTEGER NOT NULL,
+  mode TEXT NOT NULL,
+  PRIMARY KEY (user_id, task_id)
 );
 
 -- Подписки браузеров на Web Push
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL DEFAULT 0,
   keys TEXT NOT NULL,
   user_agent TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -121,6 +143,7 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 -- Заметки: табы и карточки
 CREATE TABLE IF NOT EXISTS note_tabs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL,
   color TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -154,6 +177,10 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT,
   name TEXT,
   password_hash TEXT NOT NULL,             -- scrypt$соль$хэш
+  role TEXT NOT NULL DEFAULT 'user',       -- admin | user
+  theme TEXT NOT NULL DEFAULT 'auto',      -- auto | light | dark
+  settings TEXT,                           -- JSON: личные пороги алертов и планирования
+  notify TEXT,                             -- JSON: настройки оповещений в браузере
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -192,6 +219,97 @@ if (!cols('tasks').includes('tags')) {
   db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'; UPDATE tasks SET changed_date = ''");
 }
 
+// ---------- Переход на нескольких пользователей ----------
+// Данные однопользовательской версии получают user_id = 0 («ничьи»), затем их забирает первый пользователь.
+const addCol = (table: string, ddl: string, name: string) => {
+  if (!cols(table).includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+};
+const legacy = !cols('employees').includes('user_id');
+if (legacy) {
+  db.exec(`
+    BEGIN;
+    CREATE TABLE employees_v2 (
+      user_id INTEGER NOT NULL DEFAULT 0, id INTEGER NOT NULL, name TEXT NOT NULL, department TEXT, email TEXT, position TEXT,
+      photo TEXT, sort_order INTEGER NOT NULL DEFAULT 0, is_buffer INTEGER NOT NULL DEFAULT 0, dayoff_granted REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, id));
+    INSERT INTO employees_v2 SELECT 0, id, name, department, email, position, photo, sort_order, is_buffer, dayoff_granted, created_at FROM employees;
+    DROP TABLE employees;
+    ALTER TABLE employees_v2 RENAME TO employees;
+    COMMIT;`);
+}
+if (!cols('queue').includes('user_id')) {
+  db.exec(`
+    BEGIN;
+    CREATE TABLE queue_v2 (user_id INTEGER NOT NULL DEFAULT 0, employee_id INTEGER NOT NULL, task_id INTEGER NOT NULL,
+      position INTEGER NOT NULL, PRIMARY KEY (user_id, employee_id, task_id));
+    INSERT INTO queue_v2 SELECT 0, employee_id, task_id, position FROM queue;
+    DROP TABLE queue;
+    ALTER TABLE queue_v2 RENAME TO queue;
+    COMMIT;`);
+}
+if (!cols('task_notify').includes('user_id')) {
+  db.exec(`
+    BEGIN;
+    CREATE TABLE task_notify_v2 (user_id INTEGER NOT NULL DEFAULT 0, task_id INTEGER NOT NULL, mode TEXT NOT NULL, PRIMARY KEY (user_id, task_id));
+    INSERT INTO task_notify_v2 SELECT 0, task_id, mode FROM task_notify;
+    DROP TABLE task_notify;
+    ALTER TABLE task_notify_v2 RENAME TO task_notify;
+    COMMIT;`);
+}
+if (!cols('alerts').includes('user_id')) {
+  // Ключи дедупликации получают префикс владельца — иначе после обновления все алерты пришли бы заново
+  db.exec(`ALTER TABLE alerts ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;
+           UPDATE alerts SET dedupe_key = 'u0:' || dedupe_key WHERE dedupe_key IS NOT NULL;`);
+}
+addCol('absences', 'user_id INTEGER NOT NULL DEFAULT 0', 'user_id');
+addCol('push_subscriptions', 'user_id INTEGER NOT NULL DEFAULT 0', 'user_id');
+addCol('note_tabs', 'user_id INTEGER NOT NULL DEFAULT 0', 'user_id');
+if (!cols('users').includes('role')) {
+  db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';
+           UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users);`);
+}
+addCol('users', "theme TEXT NOT NULL DEFAULT 'auto'", 'theme');
+addCol('users', 'settings TEXT', 'settings');
+addCol('users', 'notify TEXT', 'notify');
+db.exec('CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id, read_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_absences_user ON absences(user_id, employee_id, date_from)');
+
+// Группа из BITRIX_GROUP прежней версии становится первым отделом
+if (legacy && Number(process.env.BITRIX_GROUP) > 0) {
+  const g = Number(process.env.BITRIX_GROUP);
+  const name = (db.prepare('SELECT group_name AS n FROM tasks WHERE group_id = ? AND group_name IS NOT NULL LIMIT 1').get(g) as { n: string } | undefined)?.n;
+  db.prepare("INSERT OR IGNORE INTO departments(user_id, group_id, title, color, sort_order) VALUES(0, ?, ?, '#2f6fed', 1)").run(g, name || `Группа ${g}`);
+}
+
+/** Отдать «ничьи» данные (user_id = 0) пользователю — при создании первого пользователя или после миграции */
+export function claimOrphans(userId: number) {
+  db.exec('BEGIN');
+  try {
+    for (const t of ['employees', 'departments', 'queue', 'absences', 'alerts', 'task_notify', 'push_subscriptions', 'note_tabs']) {
+      db.prepare(`UPDATE ${t} SET user_id = ? WHERE user_id = 0`).run(userId);
+    }
+    // Префикс собираем в JS: число из node:sqlite при склейке строк в SQL превращается в «1.0»
+    db.prepare("UPDATE alerts SET dedupe_key = ? || substr(dedupe_key, 3) WHERE dedupe_key LIKE 'u0:%' AND user_id = ?").run(`u${userId}`, userId);
+    // Личные настройки прежней версии хранились глобально — переносим владельцу
+    const u = db.prepare('SELECT settings, notify FROM users WHERE id = ?').get(userId) as { settings: string | null; notify: string | null } | undefined;
+    if (u && !u.settings) {
+      const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
+      const keys = ['staleDays', 'idleDays', 'deadlineWarnHours', 'doneVisibleDays', 'defaultTaskDays', 'workdayHours'];
+      const s: Record<string, unknown> = {};
+      for (const r of rows) if (keys.includes(r.key)) s[r.key] = JSON.parse(r.value);
+      if (Object.keys(s).length) db.prepare('UPDATE users SET settings = ? WHERE id = ?').run(JSON.stringify(s), userId);
+    }
+    if (u && !u.notify) {
+      const n = db.prepare("SELECT value FROM settings WHERE key = 'meta:notify'").get() as { value: string } | undefined;
+      if (n) db.prepare('UPDATE users SET notify = ? WHERE id = ?').run(n.value, userId);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
 type Param = string | number | bigint | null | Uint8Array;
 const norm = (v: unknown): Param => {
   if (v === undefined || v === null) return null;
@@ -223,8 +341,8 @@ export const q = {
   },
 };
 
-export const DEFAULT_SETTINGS = {
-  syncIntervalSec: 30,
+/** Личные настройки пользователя: пороги алертов и планирование */
+export const DEFAULT_USER_SETTINGS = {
   staleDays: 7,           // задача висит на сотруднике дольше N дней
   idleDays: 3,            // по задаче нет активности N дней
   deadlineWarnHours: 24,  // предупреждать о дедлайне за N часов
@@ -232,22 +350,38 @@ export const DEFAULT_SETTINGS = {
   defaultTaskDays: 2,     // длительность задачи по умолчанию для Ганта
   workdayHours: 8,
 };
-export type Settings = typeof DEFAULT_SETTINGS;
+export type Settings = typeof DEFAULT_USER_SETTINGS;
 
-export function getSettings(): Settings {
-  const rows = q.all<{ key: string; value: string }>('SELECT key, value FROM settings');
-  const s: any = { ...DEFAULT_SETTINGS };
-  for (const r of rows) if (r.key in s) s[r.key] = JSON.parse(r.value);
-  return s;
+/** Общие настройки сервера (меняет только администратор) */
+export const DEFAULT_GLOBAL_SETTINGS = { syncIntervalSec: 30 };
+
+export function getSettings(userId: number): Settings {
+  const raw = q.get<{ settings: string | null }>('SELECT settings FROM users WHERE id = ?', userId)?.settings;
+  return { ...DEFAULT_USER_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
 }
 
-export function saveSettings(patch: Partial<Settings>) {
+export function saveSettings(userId: number, patch: Record<string, unknown>) {
+  const cur = getSettings(userId);
   for (const [k, v] of Object.entries(patch)) {
-    if (!(k in DEFAULT_SETTINGS)) continue;
+    if (!(k in DEFAULT_USER_SETTINGS)) continue;
     const n = Number(v);
-    if (!Number.isFinite(n) || n <= 0) continue;
-    q.run('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(n));
+    if (Number.isFinite(n) && n > 0) (cur as any)[k] = n;
   }
+  q.run('UPDATE users SET settings = ? WHERE id = ?', JSON.stringify(cur), userId);
+  return cur;
+}
+
+export function getGlobalSettings() {
+  const v = q.get<{ value: string }>("SELECT value FROM settings WHERE key = 'syncIntervalSec'")?.value;
+  return { syncIntervalSec: v ? Number(JSON.parse(v)) : DEFAULT_GLOBAL_SETTINGS.syncIntervalSec };
+}
+
+export function saveGlobalSettings(patch: Record<string, unknown>) {
+  const n = Number(patch.syncIntervalSec);
+  if (Number.isFinite(n) && n >= 15) {
+    q.run("INSERT INTO settings(key, value) VALUES('syncIntervalSec', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify(n));
+  }
+  return getGlobalSettings();
 }
 
 export function getMeta(key: string): string | undefined {
@@ -255,4 +389,14 @@ export function getMeta(key: string): string | undefined {
 }
 export function setMeta(key: string, value: string) {
   q.run('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', 'meta:' + key, value);
+}
+
+// Миграция на существующей базе: «ничьи» данные сразу отдаём первому пользователю (администратору)
+{
+  const first = q.get<{ id: number | null }>('SELECT MIN(id) AS id FROM users')?.id;
+  const orphans = q.get<{ n: number }>(
+    `SELECT (SELECT COUNT(*) FROM employees WHERE user_id = 0) + (SELECT COUNT(*) FROM departments WHERE user_id = 0)
+          + (SELECT COUNT(*) FROM note_tabs WHERE user_id = 0) + (SELECT COUNT(*) FROM alerts WHERE user_id = 0) AS n`,
+  )!.n;
+  if (first && orphans) claimOrphans(first);
 }

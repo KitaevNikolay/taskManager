@@ -11,10 +11,16 @@ import { AbsencesPage } from './pages/Absences';
 const NotesPage = lazy(() => import('./pages/Notes').then((m) => ({ default: m.NotesPage })));
 import { TaskDrawer } from './components/TaskDrawer';
 import { currentSubscription, showLocal } from './push';
+import { applyTheme, type ThemePref } from './theme';
 import { LoginScreen, ResetScreen, SetupScreen, type AuthStatus } from './components/Auth';
 
+type User = NonNullable<AuthStatus['user']>;
+
 interface Ctx {
+  user: User;
+  isAdmin: boolean;
   meta: Meta | null;
+  reloadMeta: () => void;
   employees: Employee[];
   reloadEmployees: () => void;
   /** Растёт при каждом изменении задач — страницы перезапрашивают данные */
@@ -40,7 +46,7 @@ const PAGES = [
   { id: 'alerts', title: 'Алерты', el: AlertsPage },
   { id: 'notes', title: 'Заметки', el: NotesPage },
   { id: 'employees', title: 'Сотрудники', el: EmployeesPage },
-  { id: 'settings', title: 'Настройки', el: SettingsPage },
+  { id: 'settings', title: 'Кабинет', el: SettingsPage },
 ] as const;
 
 function useHashRoute() {
@@ -78,9 +84,12 @@ export function App() {
 
 interface Toast { id: number; text: string; tone: string }
 
-function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
+function Shell({ user }: { user: User }) {
   const route = useHashRoute();
   const [meta, setMeta] = useState<Meta | null>(null);
+  const reloadMeta = useCallback(() => void api.get<Meta>('/meta').then(setMeta), []);
+  // Тема из профиля пользователя важнее запомненной в браузере
+  useEffect(() => applyTheme(user.theme), [user.theme]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [version, setVersion] = useState(0);
   const [taskId, setTaskId] = useState<number | null>(null);
@@ -102,12 +111,12 @@ function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
   useEffect(() => {
-    api.get<Meta>('/meta').then(setMeta);
+    reloadMeta();
     api.get<any>('/settings').then((s) => setWarnHours(s.deadlineWarnHours));
     reloadEmployees();
     refreshUnread();
     refreshPush();
-  }, [reloadEmployees, refreshUnread, refreshPush]);
+  }, [reloadMeta, reloadEmployees, refreshUnread, refreshPush]);
 
   // Клик по оповещению: service worker просит открыть задачу; при открытии новой вкладки — ?task=ID
   useEffect(() => {
@@ -125,6 +134,29 @@ function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
     return () => navigator.serviceWorker?.removeEventListener('message', onMsg);
   }, []);
 
+  // Алерты, пришедшие пачкой (например, после добавления отдела), показываем одним уведомлением
+  const alertBuf = useRef<(Alert & { notify?: boolean })[]>([]);
+  const alertTimer = useRef<number | null>(null);
+  const queueAlertToast = useCallback((a: Alert) => {
+    alertBuf.current.push(a);
+    if (alertTimer.current) return;
+    alertTimer.current = window.setTimeout(() => {
+      const batch = alertBuf.current;
+      alertBuf.current = [];
+      alertTimer.current = null;
+      if (batch.length <= 3) {
+        for (const x of batch) {
+          toast(x.title, 'info');
+          // Подписанный браузер получит Web Push от сервера — здесь не дублируем
+          if (!pushRef.current) void showLocal(x.title, x.message || '', `alert-${x.id}`, x.task_id, x.note_id ? `/#/notes?note=${x.note_id}` : undefined);
+        }
+      } else {
+        toast(`Новых алертов: ${batch.length} — см. раздел «Алерты»`, 'info');
+        if (!pushRef.current) void showLocal(`Новых алертов: ${batch.length}`, batch.slice(0, 3).map((x) => '• ' + x.title).join('\n'), 'alert-batch', null, '/#/alerts');
+      }
+    }, 1500);
+  }, [toast]);
+
   // Живые обновления через SSE
   useEffect(() => {
     const es = new EventSource('/api/events');
@@ -138,15 +170,11 @@ function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
       } else if (e.type === 'alert') {
         const a = e.alert as Alert & { notify?: boolean };
         refreshUnread();
-        if (a.notify) {
-          toast(a.title, 'info');
-          // Подписанный браузер получит Web Push от сервера — здесь не дублируем
-          if (!pushRef.current) void showLocal(a.title, a.message || '', `alert-${a.id}`, a.task_id, a.note_id ? `/#/notes?note=${a.note_id}` : undefined);
-        }
+        if (a.notify) queueAlertToast(a);
       }
     };
     return () => es.close();
-  }, [bump, reloadEmployees, refreshUnread, toast]);
+  }, [bump, reloadEmployees, refreshUnread, queueAlertToast]);
 
   // Число непрочитанных алертов во вкладке браузера
   useEffect(() => {
@@ -154,8 +182,8 @@ function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
   }, [unread]);
 
   const ctx = useMemo<Ctx>(
-    () => ({ meta, employees, reloadEmployees, version, bump, openTask: setTaskId, toast, unread, refreshUnread, warnHours, pushActive, refreshPush }),
-    [meta, employees, reloadEmployees, version, bump, toast, unread, refreshUnread, warnHours, pushActive, refreshPush],
+    () => ({ user, isAdmin: user.role === 'admin', meta, reloadMeta, employees, reloadEmployees, version, bump, openTask: setTaskId, toast, unread, refreshUnread, warnHours, pushActive, refreshPush }),
+    [user, meta, reloadMeta, employees, reloadEmployees, version, bump, toast, unread, refreshUnread, warnHours, pushActive, refreshPush],
   );
   const Page = (PAGES.find((p) => p.id === route) || PAGES[0]).el;
 
@@ -174,10 +202,14 @@ function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
           </nav>
           <div className="topbar-right">
             <SyncIndicator />
-            <a className={`btn ghost sm notify-link ${pushActive ? 'on' : ''}`} href="#/settings?notify" title="Настройки оповещений в браузере">
-              {pushActive ? '🔔 Оповещения' : '🔕 Включить оповещения'}
+            <a className={`btn ghost sm notify-link ${pushActive ? 'on' : ''}`} href="#/settings?notify" title={pushActive ? 'Оповещения в браузере включены' : 'Включить оповещения в браузере'}>
+              {pushActive ? '🔔' : '🔕'}
             </a>
-            <span className="topbar-user" title={user.email || ''}>{user.name || user.login}</span>
+            <ThemeToggle initial={user.theme} />
+            <a className="topbar-user" href="#/settings" title={`${user.login}${user.email ? ' · ' + user.email : ''} — личный кабинет`}>
+              {user.name || user.login}
+              {user.role === 'admin' && <span className="chip accent role-chip">админ</span>}
+            </a>
             <button className="btn ghost sm" onClick={() => api.post('/auth/logout').then(() => location.reload())}>
               Выйти
             </button>
@@ -196,6 +228,29 @@ function Shell({ user }: { user: NonNullable<AuthStatus['user']> }) {
         </div>
       </div>
     </AppCtx.Provider>
+  );
+}
+
+const THEMES: { id: ThemePref; icon: string; title: string }[] = [
+  { id: 'auto', icon: '◐', title: 'Тема: как в системе' },
+  { id: 'light', icon: '☀', title: 'Тема: светлая' },
+  { id: 'dark', icon: '☾', title: 'Тема: тёмная' },
+];
+
+/** Переключатель темы: авто → светлая → тёмная. Выбор сохраняется в профиле. */
+function ThemeToggle({ initial }: { initial: ThemePref }) {
+  const [theme, setTheme] = useState<ThemePref>(initial);
+  const cur = THEMES.find((t) => t.id === theme) || THEMES[0];
+  const next = () => {
+    const n = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length].id;
+    setTheme(n);
+    applyTheme(n);
+    void api.put('/me/theme', { theme: n }).catch(() => null);
+  };
+  return (
+    <button className="btn ghost sm theme-toggle" onClick={next} title={`${cur.title} (нажмите, чтобы сменить)`} aria-label={cur.title}>
+      {cur.icon}
+    </button>
   );
 }
 

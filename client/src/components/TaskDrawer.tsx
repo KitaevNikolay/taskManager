@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ALERT_TYPES, api, fmtDateTime, relTime, toYmd, type Alert, type Task } from '../api';
+import { ALERT_TYPES, api, departmentOf, fmtDateTime, relTime, stagesOf, toYmd, type Alert, type Task } from '../api';
 import { useApp } from '../App';
 import { Avatar, StageChip, StatusChip, Tags } from './TaskCard';
 import { TaskNotifyToggle } from './NotifySettings';
@@ -56,7 +56,9 @@ export function TaskDrawer({ taskId, onClose }: { taskId: number; onClose: () =>
   const respOptions = task && task.responsible_id && !employees.some((e) => e.id === task.responsible_id)
     ? [{ id: task.responsible_id, name: task.responsible_name || `#${task.responsible_id}` }, ...employees]
     : employees;
-  const isGroupTask = task && meta && task.group_id === meta.groupId;
+  // Стадию можно менять, если у группы задачи есть канбан (стадии известны)
+  const groupStages = task ? stagesOf(meta, task.group_id) : [];
+  const dep = task ? departmentOf(meta, task) : null;
 
   return (
     <div className="drawer-backdrop" onClick={onClose}>
@@ -67,7 +69,14 @@ export function TaskDrawer({ taskId, onClose }: { taskId: number; onClose: () =>
           <>
             <div className="drawer-head">
               <div>
-                <div className="task-id">#{task.id} {task.group_name && <span className="muted">· {task.group_name}</span>}</div>
+                <div className="task-id">
+                  #{task.id}
+                  {dep ? (
+                    <span className="chip dep-chip" style={{ ['--dep' as string]: dep.color }}>{dep.title}</span>
+                  ) : (
+                    task.group_name && <span className="muted"> · {task.group_name}</span>
+                  )}
+                </div>
                 <h2>{task.title}</h2>
               </div>
               <div className="drawer-head-actions">
@@ -88,12 +97,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: number; onClose: () =>
                   ))}
                 </div>
 
-                {!isGroupTask && meta!.allStages.some((s) => s.id === task.stage_id) && (
-                  <>
-                    <div className="k">Стадия</div>
-                    <div className="v"><StageChip task={task} /></div>
-                  </>
-                )}
+
                 {task.tags.length > 0 && (
                   <>
                     <div className="k">Теги</div>
@@ -101,14 +105,18 @@ export function TaskDrawer({ taskId, onClose }: { taskId: number; onClose: () =>
                   </>
                 )}
 
-                {isGroupTask && (
+                {groupStages.length > 0 && (
                   <>
                     <div className="k">Стадия</div>
                     <div className="v">
-                      <select value={task.stage_id ?? ''} disabled={busy} onChange={(e) => run(() => api.post(`/tasks/${task.id}/stage`, { stageId: Number(e.target.value) }), 'Стадия изменена')}>
-                        {!meta!.stages.some((s) => s.id === task.stage_id) && <option value={task.stage_id ?? ''}>—</option>}
-                        {meta!.stages.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
-                      </select>
+                      {task.is_employee || dep ? (
+                        <select value={task.stage_id ?? ''} disabled={busy} onChange={(e) => run(() => api.post(`/tasks/${task.id}/stage`, { stageId: Number(e.target.value) }), 'Стадия изменена')}>
+                          {!groupStages.some((s) => s.id === task.stage_id) && <option value={task.stage_id ?? ''}>—</option>}
+                          {groupStages.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+                        </select>
+                      ) : (
+                        <StageChip task={task} />
+                      )}
                     </div>
                   </>
                 )}

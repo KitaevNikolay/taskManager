@@ -1,7 +1,8 @@
-import { q, getSettings, getMeta, setMeta } from './db.ts';
-import { batch, callResult, listTasks, GROUP_ID, TASK_SELECT, BitrixError, type B24Task, type HistoryItem } from './bitrix.ts';
+import { q, getGlobalSettings, getMeta, setMeta } from './db.ts';
+import { batch, callResult, listTasks, TASK_SELECT, BitrixError, type B24Task, type HistoryItem } from './bitrix.ts';
 import { emit } from './bus.ts';
-import { addAlert, runRules } from './alerts.ts';
+import { addTaskAlert, runRules } from './alerts.ts';
+import { allEmpIds, allGroups } from './scope.ts';
 
 export const STATUS_NAMES: Record<number, string> = {
   1: 'Новая', 2: 'Ждёт выполнения', 3: 'Выполняется', 4: 'Ждёт контроля', 5: 'Завершена', 6: 'Отложена', 7: 'Отклонена',
@@ -25,7 +26,6 @@ export const syncState = {
   selfUserId: 0,
 };
 
-const empIds = () => q.all<{ id: number }>('SELECT id FROM employees').map((r) => r.id);
 const num = (v: unknown) => (v === null || v === undefined || v === '' ? null : Number(v));
 
 /** Дата для фильтров Б24: ISO с явным смещением */
@@ -33,10 +33,10 @@ function b24Date(d: Date) {
   return d.toISOString().replace(/\.\d{3}Z$/, '+00:00');
 }
 
-/** Стадии канбана группы отдела и групп, в которых есть задачи сотрудников */
-export async function syncStages() {
-  const groups = new Set<number>(q.all<{ g: number }>('SELECT DISTINCT group_id AS g FROM tasks WHERE group_id > 0').map((r) => r.g));
-  if (GROUP_ID) groups.add(GROUP_ID);
+/** Стадии канбанов: отделы всех пользователей и группы, в которых есть задачи сотрудников */
+export async function syncStages(only?: number[]) {
+  const groups = new Set<number>(only ?? q.all<{ g: number }>('SELECT DISTINCT group_id AS g FROM tasks WHERE group_id > 0').map((r) => r.g));
+  if (!only) for (const g of allGroups()) groups.add(g);
   if (!groups.size) return;
   const cmds: Record<string, [string, Record<string, unknown>]> = {};
   for (const g of groups) cmds[`g${g}`] = ['task.stages.get', { entityId: g }];
@@ -76,7 +76,7 @@ function upsertTask(t: B24Task) {
 
 function userName(id: string | number | null | undefined): string {
   if (!id) return '—';
-  const e = q.get<{ name: string }>('SELECT name FROM employees WHERE id = ?', Number(id));
+  const e = q.get<{ name: string }>('SELECT name FROM employees WHERE id = ? LIMIT 1', Number(id));
   if (e) return e.name;
   const t = q.get<{ responsible_name: string }>('SELECT responsible_name FROM tasks WHERE responsible_id = ? AND responsible_name IS NOT NULL LIMIT 1', Number(id));
   return t?.responsible_name || `#${id}`;
@@ -146,7 +146,6 @@ async function processTasks(tasks: B24Task[], { alerts }: { alerts: boolean }) {
   if (!changed.length) return [];
 
   const details = await fetchDetails(changed.map((t) => Number(t.id)));
-  const employees = new Set(empIds());
 
   q.tx(() => {
     for (const t of changed) {
@@ -165,18 +164,18 @@ async function processTasks(tasks: B24Task[], { alerts }: { alerts: boolean }) {
 
       if (!alerts) continue;
       const respId = num(t.responsibleId);
-      const empId = respId && employees.has(respId) ? respId : null;
+      const ref = { id, group_id: num(t.groupId), responsible_id: respId };
 
       if (!prev) {
         // Задача впервые попала в выборку. Алертим только о свежих событиях,
-        // а не о старых задачах, подтянутых при добавлении сотрудника.
+        // а не о старых задачах, подтянутых при добавлении сотрудника или отдела.
         const lastGroup = [...d.history].reverse().find((h) => h.field === 'GROUP_ID');
         const recent = (iso?: string | null) => !!iso && Date.now() - new Date(iso).getTime() < 6 * 3600e3;
-        if (Number(t.groupId) === GROUP_ID) {
-          if (!recent(lastGroup?.createdDate || t.createdDate)) continue;
-          addAlert({ key: `new:${id}`, type: 'new', taskId: id, employeeId: empId, title: `Новая задача в отделе: ${t.title}`, message: `Ответственный: ${t.responsible?.name || '—'}`, author: t.creator?.name });
-        } else if (empId && recent(lastResp?.createdDate || t.createdDate)) {
-          addAlert({ key: `assigned:${id}:${respId}`, type: 'assigned', taskId: id, employeeId: empId, title: `Сотруднику назначена задача: ${t.title}`, message: `Ответственный: ${t.responsible?.name}`, author: t.creator?.name });
+        if (recent(lastGroup?.createdDate || t.createdDate)) {
+          addTaskAlert(ref, { key: `new:${id}`, type: 'new', title: `Новая задача в отделе: ${t.title}`, message: `Ответственный: ${t.responsible?.name || '—'}`, author: t.creator?.name }, 'group');
+        }
+        if (recent(lastResp?.createdDate || t.createdDate)) {
+          addTaskAlert(ref, { key: `assigned:${id}:${respId}`, type: 'assigned', title: `Сотруднику назначена задача: ${t.title}`, message: `Ответственный: ${t.responsible?.name}`, author: t.creator?.name }, 'employee');
         }
         continue;
       }
@@ -190,11 +189,9 @@ async function processTasks(tasks: B24Task[], { alerts }: { alerts: boolean }) {
         }
         for (const [author, items] of byAuthor) {
           const reassigned = items.some((i) => i.field === 'RESPONSIBLE_ID');
-          addAlert({
+          addTaskAlert(ref, {
             key: `change:${id}:${items[items.length - 1].id}`,
             type: reassigned ? 'assigned' : 'change',
-            taskId: id,
-            employeeId: empId,
             title: `${reassigned ? 'Смена ответственного' : 'Изменения'}: ${t.title}`,
             message: describeChanges(items),
             author,
@@ -202,7 +199,7 @@ async function processTasks(tasks: B24Task[], { alerts }: { alerts: boolean }) {
         }
       } else if (prev.activity_date !== t.activityDate && prev.changed_date === t.changedDate && t.activityDate) {
         // Активность без изменений полей — сообщение/комментарий в чате задачи
-        addAlert({ key: `comment:${id}:${t.activityDate}`, type: 'comment', taskId: id, employeeId: empId, title: `Новый комментарий: ${t.title}`, message: 'В чате задачи появилось новое сообщение' });
+        addTaskAlert(ref, { key: `comment:${id}:${t.activityDate}`, type: 'comment', title: `Новый комментарий: ${t.title}`, message: 'В чате задачи появилось новое сообщение' });
       }
     }
   });
@@ -210,9 +207,10 @@ async function processTasks(tasks: B24Task[], { alerts }: { alerts: boolean }) {
 }
 
 async function fetchScope(extra: Record<string, unknown>[]): Promise<B24Task[]> {
-  const ids = empIds();
+  const ids = allEmpIds();
+  const groups = allGroups();
   const scopes: Record<string, unknown>[] = [];
-  if (GROUP_ID) scopes.push({ GROUP_ID });
+  if (groups.length) scopes.push({ GROUP_ID: groups });
   if (ids.length) scopes.push({ RESPONSIBLE_ID: ids });
   const byId = new Map<string, B24Task>();
   for (const s of scopes) for (const e of extra) for (const t of await listTasks({ ...s, ...e })) byId.set(t.id, t);
@@ -226,16 +224,20 @@ async function fullSync(alerts: boolean) {
   const seen = new Set(tasks.map((t) => Number(t.id)));
   const updated = await processTasks(tasks, { alerts });
 
-  // Открытые задачи в БД, которых нет в выборке: закрыты давно, удалены или ушли из области
-  const missing = q.all<{ id: number }>('SELECT id FROM tasks WHERE status != 5').map((r) => r.id).filter((id) => !seen.has(id));
+  // Открытые задачи в БД, которых нет в выборке: закрыты давно, удалены или ушли из области.
+  // Пустая область (нет ни отделов, ни сотрудников) — ничего не удаляем: это не «все задачи ушли».
+  const scopeEmpty = !allGroups().length && !allEmpIds().length;
+  const missing = scopeEmpty ? [] : q.all<{ id: number }>('SELECT id FROM tasks WHERE status != 5').map((r) => r.id).filter((id) => !seen.has(id));
   if (missing.length) {
     const cmds: Record<string, [string, Record<string, unknown>]> = {};
     for (const id of missing) cmds[`t${id}`] = ['tasks.task.get', { taskId: id, select: TASK_SELECT }];
     const { result } = await batch(cmds);
     const alive: B24Task[] = [];
+    const groups = allGroups();
+    const emps = allEmpIds();
     for (const id of missing) {
       const t = result[`t${id}`]?.task as B24Task | undefined;
-      const inScope = t && (Number(t.groupId) === GROUP_ID || empIds().includes(Number(t.responsibleId)));
+      const inScope = t && (groups.includes(Number(t.groupId)) || emps.includes(Number(t.responsibleId)));
       if (t && inScope) alive.push(t);
       else {
         q.run('DELETE FROM tasks WHERE id = ?', id);
@@ -256,8 +258,26 @@ async function incrementalSync() {
   return processTasks(tasks, { alerts: true });
 }
 
-export async function runSync(opts: { full?: boolean } = {}) {
-  if (syncState.running) return;
+let pendingFull = false;
+let current: Promise<void> | null = null;
+
+/** Синхронизация. Если уже идёт — полная сверка (например, после добавления отдела) встаёт в очередь и выполнится сразу после. */
+export async function runSync(opts: { full?: boolean } = {}): Promise<void> {
+  if (syncState.running) {
+    if (opts.full) pendingFull = true;
+    return current ?? undefined;
+  }
+  current = doSync(opts).finally(() => {
+    current = null;
+    if (pendingFull) {
+      pendingFull = false;
+      void runSync({ full: true });
+    }
+  });
+  return current;
+}
+
+async function doSync(opts: { full?: boolean }) {
   syncState.running = true;
   const startedAt = new Date().toISOString();
   try {
@@ -313,7 +333,7 @@ let timer: NodeJS.Timeout | null = null;
 export function startSyncLoop() {
   const tick = async () => {
     await runSync();
-    timer = setTimeout(tick, getSettings().syncIntervalSec * 1000);
+    timer = setTimeout(tick, getGlobalSettings().syncIntervalSec * 1000);
   };
   void tick();
 }
