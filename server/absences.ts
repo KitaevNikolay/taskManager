@@ -35,12 +35,18 @@ export function absenceInfo(userId: number, empId: number) {
   return { absence_now: now, absence_next: next };
 }
 
-function validate(userId: number, b: any, id?: number): Omit<Absence, 'id'> {
+function validateBasic(userId: number, b: any): Omit<Absence, 'id'> {
   const employee_id = Number(b.employee_id);
   if (!q.get('SELECT id FROM employees WHERE user_id = ? AND id = ?', userId, employee_id)) throw new BadRequest('Сотрудник не найден');
   if (!TYPES.includes(b.type)) throw new BadRequest('Неизвестный тип отсутствия');
   if (!isYmd(b.date_from) || !isYmd(b.date_to)) throw new BadRequest('Укажите даты начала и окончания');
   if (b.date_to < b.date_from) throw new BadRequest('Дата окончания раньше даты начала');
+  return { user_id: userId, employee_id, type: b.type, date_from: b.date_from, date_to: b.date_to, comment: String(b.comment || '').trim().slice(0, 500) || null };
+}
+
+function validate(userId: number, b: any, id?: number): Omit<Absence, 'id'> {
+  const base = validateBasic(userId, b);
+  const employee_id = base.employee_id;
   const clash = q.get<Absence>(
     'SELECT * FROM absences WHERE user_id = ? AND employee_id = ? AND id != ? AND date_from <= ? AND date_to >= ?',
     userId, employee_id, id ?? 0, b.date_to, b.date_from,
@@ -48,7 +54,14 @@ function validate(userId: number, b: any, id?: number): Omit<Absence, 'id'> {
   if (clash) {
     throw new BadRequest(`Пересекается с другим отсутствием: ${ABSENCE_NAMES[clash.type]} ${clash.date_from} — ${clash.date_to}`);
   }
-  return { user_id: userId, employee_id, type: b.type, date_from: b.date_from, date_to: b.date_to, comment: String(b.comment || '').trim() || null };
+  return base;
+}
+
+/** Удалить отсутствие вместе со следами (сдвиги сроков в Б24 при этом не откатываются) */
+function removeAbsence(userId: number, id: number) {
+  q.run('DELETE FROM absences WHERE id = ? AND user_id = ?', id, userId);
+  q.run('DELETE FROM absence_shifts WHERE absence_id = ?', id);
+  q.run("DELETE FROM alerts WHERE user_id = ? AND type = 'absence' AND dedupe_key LIKE ?", userId, `%:${id}`);
 }
 
 const withMeta = (a: Absence) => ({
@@ -92,9 +105,7 @@ absencesApi.put('/absences/:id', (req, res) => {
 
 absencesApi.delete('/absences/:id', (req, res) => {
   const id = ownAbsence(uid(req), Number(req.params.id)).id;
-  q.run('DELETE FROM absences WHERE id = ?', id);
-  q.run('DELETE FROM absence_shifts WHERE absence_id = ?', id);
-  q.run("DELETE FROM alerts WHERE user_id = ? AND type = 'absence' AND dedupe_key LIKE ?", uid(req), `%:${id}`);
+  removeAbsence(uid(req), id);
   emit({ type: 'tasks', ids: [] });
   res.json({ ok: true });
 });
@@ -174,6 +185,67 @@ absencesApi.post('/absences/:id/apply', async (req, res) => {
   }
   runRulesFor(uid(req));
   res.json({ ok, errors });
+});
+
+// ---------- Импорт из файла ----------
+// Файл разбирается в браузере; сюда приходят строки с уже найденным сотрудником.
+// dryRun — только проверка (для предпросмотра). conflict: skip — пересекающиеся строки пропускаются,
+// replace — пересекающиеся отсутствия сотрудника удаляются и заменяются строкой из файла.
+type ImportStatus = 'ok' | 'replace' | 'duplicate' | 'conflict' | 'error';
+
+absencesApi.post('/absences/import', (req, res) => {
+  const u = uid(req);
+  const rows: any[] = Array.isArray(req.body?.rows) ? req.body.rows.slice(0, 2000) : [];
+  const mode = req.body?.conflict === 'replace' ? 'replace' : 'skip';
+  const dry = !!req.body?.dryRun;
+  const fmt = (a: { type: string; date_from: string; date_to: string }) => `${ABSENCE_NAMES[a.type]} ${a.date_from.split('-').reverse().join('.')}–${a.date_to.split('-').reverse().join('.')}`;
+
+  const results: { index: number; status: ImportStatus; reason?: string; replaces?: number[]; absence_id?: number; impact?: number }[] = [];
+  const accepted: (Omit<Absence, 'id'> & { index: number; replaces: number[] })[] = [];
+
+  rows.forEach((r, index) => {
+    let a: Omit<Absence, 'id'>;
+    try {
+      a = validateBasic(u, r);
+    } catch (e: any) {
+      return results.push({ index, status: 'error', reason: e.message });
+    }
+    const inFile = accepted.find((x) => x.employee_id === a.employee_id && x.date_from <= a.date_to && x.date_to >= a.date_from);
+    if (inFile) return results.push({ index, status: 'error', reason: `Пересекается со строкой ${inFile.index + 1} файла` });
+    const existing = q.all<Absence>(
+      'SELECT * FROM absences WHERE user_id = ? AND employee_id = ? AND date_from <= ? AND date_to >= ?',
+      u, a.employee_id, a.date_to, a.date_from,
+    );
+    if (existing.some((x) => x.type === a.type && x.date_from === a.date_from && x.date_to === a.date_to)) {
+      return results.push({ index, status: 'duplicate' });
+    }
+    if (existing.length && mode === 'skip') {
+      return results.push({ index, status: 'conflict', reason: `Пересекается: ${existing.map(fmt).join(', ')}` });
+    }
+    const replaces = existing.map((x) => x.id);
+    accepted.push({ ...a, index, replaces });
+    results.push({ index, status: replaces.length ? 'replace' : 'ok', reason: replaces.length ? `Заменит: ${existing.map(fmt).join(', ')}` : undefined, replaces });
+  });
+
+  if (!dry && accepted.length) {
+    q.tx(() => {
+      for (const a of accepted) {
+        for (const id of a.replaces) removeAbsence(u, id);
+        const r = q.run('INSERT INTO absences(user_id, employee_id, type, date_from, date_to, comment) VALUES(?,?,?,?,?,?)', u, a.employee_id, a.type, a.date_from, a.date_to, a.comment);
+        const res = results.find((x) => x.index === a.index)!;
+        res.absence_id = Number(r.lastInsertRowid);
+      }
+    });
+    // Сколько задач со сроками затрагивает каждое новое отсутствие — чтобы предложить сдвинуть
+    for (const res of results) {
+      if (!res.absence_id) continue;
+      const abs = q.get<Absence>('SELECT * FROM absences WHERE id = ?', res.absence_id)!;
+      res.impact = impact(abs).filter((t) => !t.applied).length;
+    }
+    runRulesFor(u);
+    emit({ type: 'tasks', ids: [] });
+  }
+  res.json({ results, created: dry ? 0 : accepted.length });
 });
 
 absencesApi.use((err: any, _req: any, res: any, next: any) => (err instanceof BadRequest ? res.status(400).json({ error: err.message }) : next(err)));

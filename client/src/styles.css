@@ -651,3 +651,23 @@ button.load-task { display: block; overflow: hidden; text-overflow: ellipsis; }
 .dist-target-main .absence-chip { margin-left: 4px; }
 .dist-target-sub { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 8px; margin-top: 3px; }
 .dist-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* ---------- Импорт отсутствий ---------- */
+.abs-import { width: min(1100px, 100%); display: flex; flex-direction: column; gap: 12px; }
+.abs-import h2 { margin: 0; }
+.tpl-buttons { display: inline-flex; gap: 4px; }
+.drop-zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px; border: 2px dashed var(--border); border-radius: 10px; background: var(--surface-2); }
+.drop-zone.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop-zone label.btn { cursor: pointer; flex: none; }
+.imp-mapping summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.imp-map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 12px; margin-top: 8px; }
+.imp-summary { color: var(--muted); }
+.imp-summary b { color: var(--text); }
+.ok-text { color: var(--ok) !important; }
+.imp-table { max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.imp-table th { position: sticky; top: 0; z-index: 1; }
+.imp-table td { padding: 6px 10px; font-size: 13px; }
+.imp-table select { max-width: 240px; }
+.imp-comment { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp-status { min-width: 160px; }
+.imp-result { display: flex; flex-direction: column; max-height: 50vh; overflow-y: auto; }

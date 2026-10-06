@@ -41,7 +41,9 @@
     "dompurify": "^3.4.16",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "read-excel-file": "^9.3.10",
     "typescript": "^5.9.0",
-    "vite": "^7.1.0"
+    "vite": "^7.1.0",
+    "write-excel-file": "^4.1.1"
   }
 }

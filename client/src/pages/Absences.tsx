@@ -6,6 +6,7 @@ import {
 import { useApp } from '../App';
 import { Avatar } from '../components/TaskCard';
 import { AbsenceBadge } from '../components/AbsenceBadge';
+import { AbsenceImport, TemplateButtons } from '../components/AbsenceImport';
 
 const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const VIEW_MONTHS = 2;
@@ -37,6 +38,7 @@ export function AbsencesPage() {
   const [absences, setAbsences] = useState<Absence[]>([]);
   const [form, setForm] = useState<FormState | null>(null);
   const [impactFor, setImpactFor] = useState<number | null>(null);
+  const [importing, setImporting] = useState(false);
 
   const end = addDays(shiftMonth(start, VIEW_MONTHS), -1);
   const year = start.slice(0, 4);
@@ -75,6 +77,8 @@ export function AbsencesPage() {
           <span className="month-title">
             {MONTHS[Number(start.slice(5, 7)) - 1]} – {MONTHS[Number(end.slice(5, 7)) - 1]} {end.slice(0, 4)}
           </span>
+          <TemplateButtons />
+          <button className="btn" disabled={!employees.length} onClick={() => setImporting(true)} title="Загрузить график отпусков из XLSX, CSV или JSON">Импорт из файла</button>
           <button className="btn primary" disabled={!employees.length} onClick={() => openNew()}>+ Добавить отсутствие</button>
         </div>
       </div>
@@ -145,6 +149,7 @@ export function AbsencesPage() {
       <Summary year={year} absences={absences} onOpen={(a) => setForm({ id: a.id, employee_id: a.employee_id, type: a.type, date_from: a.date_from, date_to: a.date_to, comment: a.comment || '' })} onImpact={setImpactFor} />
 
       {form && <AbsenceForm initial={form} onClose={() => setForm(null)} onSaved={afterSave} onImpact={(id) => { setForm(null); setImpactFor(id); }} />}
+      {importing && <AbsenceImport onClose={() => setImporting(false)} onDone={() => load()} onImpact={(id) => setImpactFor(id)} />}
       {impactFor !== null && <ImpactModal absenceId={impactFor} onClose={() => { setImpactFor(null); load(); }} />}
     </div>
   );
