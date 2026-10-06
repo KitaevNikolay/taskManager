@@ -220,14 +220,16 @@ export function toRows(rows: Cell[][], headerIdx: number, mp: Mapping, employees
     if (!employee_id && empRaw === null && !empErr) empErr = 'Не указан сотрудник';
     const type = parseType(get(r, 'type'));
     const date_from = parseDate(get(r, 'from'));
-    let date_to = parseDate(get(r, 'to'));
-    const days = Number(get(r, 'days'));
-    if (!date_to && date_from && Number.isFinite(days) && days >= 1) date_to = addDays(date_from, Math.round(days) - 1);
+    const daysRaw = get(r, 'days');
+    const days = daysRaw === null || daysRaw === '' ? NaN : Number(String(daysRaw).replace(',', '.'));
+    // Количество дней главнее даты окончания: окончание = начало + дней − 1 (так же считает формула в шаблоне)
+    const date_to = date_from && Number.isFinite(days) && days >= 1 ? addDays(date_from, Math.round(days) - 1) : parseDate(get(r, 'to'));
     const empError = employee_id ? null : empErr || 'Не указан сотрудник';
     const dataError =
       !type ? `Неизвестный тип «${String(get(r, 'type'))}»`
         : !date_from ? `Не распознана дата начала «${String(get(r, 'from') ?? '')}»`
-          : !date_to ? 'Нет даты окончания и количества дней'
+          : daysRaw !== null && daysRaw !== '' && !(days >= 1) ? `Не распознано количество дней «${String(daysRaw)}»`
+          : !date_to ? 'Укажите количество дней (или дату окончания)'
             : date_to < date_from ? 'Окончание раньше начала' : null;
     const error = empError || dataError;
     return {
@@ -246,46 +248,70 @@ export function toRows(rows: Cell[][], headerIdx: number, mp: Mapping, employees
 }
 
 // ---------- Шаблон для заполнения: все сотрудники пользователя ----------
-const TEMPLATE_HEADER = ['Сотрудник', 'ID в Битрикс24', 'Команда', 'Тип', 'С', 'По', 'Количество дней', 'Комментарий'];
+// Колонки: A Сотрудник, B ID, C Команда, D Тип, E Начало, F Дней, G Окончание (формула), H Комментарий
+const TEMPLATE_HEADER = ['Сотрудник', 'ID в Битрикс24', 'Команда', 'Тип', 'Начало', 'Дней', 'Окончание', 'Комментарий'];
+/** Сколько строк-периодов отпуска заготовить на каждого сотрудника */
+export const TEMPLATE_PERIODS = 4;
 const teamOf = (e: Employee) => (e.department || '').trim();
 
 const INSTRUCTION = [
   'Как заполнить',
   '',
-  '1. Для каждого сотрудника укажите дату начала («С») и дату окончания («По») — обе включительно.',
-  '   Вместо «По» можно указать «Количество дней» — тогда окончание посчитается само.',
-  '2. Тип: Отпуск, Отгул или Больничный. Если оставить пустым — будет отпуск.',
-  '3. Отпуск из нескольких частей — скопируйте строку сотрудника и укажите даты каждой части.',
-  '4. Строки без дат при загрузке пропускаются — их можно не удалять.',
-  '5. Даты: 01.07.2027, 2027-07-01 или обычная дата Excel.',
-  '6. Сотрудник определяется по «ID в Битрикс24», а если его нет — по ФИО.',
+  `1. У каждого сотрудника ${TEMPLATE_PERIODS} строки — по строке на каждый период отпуска. Нужно больше — скопируйте строку сотрудника.`,
+  '2. Укажите «Начало» (дату первого дня) и «Дней» — количество календарных дней, первый и последний день включительно.',
+  '3. «Окончание» считается само по формуле: Начало + Дней − 1. Его не нужно заполнять.',
+  '4. Тип: Отпуск, Отгул или Больничный. Если оставить пустым — будет отпуск.',
+  '5. Строки без дат при загрузке пропускаются — лишние можно не удалять.',
+  '6. Даты: 01.07.2027, 2027-07-01 или обычная дата Excel.',
+  '7. Сотрудник определяется по «ID в Битрикс24», а если его нет — по ФИО.',
   '',
   'Загрузить заполненный файл: «Отсутствия» → «Импорт из файла».',
 ];
 
-/** Шаблон XLSX: лист со всеми сотрудниками и лист с инструкцией */
+/** Шаблон XLSX: по несколько строк-периодов на сотрудника, окончание — формулой; лист с инструкцией */
 export async function downloadTemplateXlsx(employees: Employee[]) {
   const { default: writeExcelFile } = await import('write-excel-file/browser');
-  const head = TEMPLATE_HEADER.map((v) => ({ value: v, fontWeight: 'bold' as const, backgroundColor: '#E8F0FE' }));
-  const rows = employees.map((e) => [e.name, e.id, teamOf(e) || null, 'Отпуск', null, null, null, null]);
+  const head = TEMPLATE_HEADER.map((v) => ({ value: v, fontWeight: 'bold' as const, backgroundColor: '#E8F0FE', borderColor: '#B8C7E0', borderStyle: 'thin' }));
+  const DATE = 'dd.mm.yyyy';
+  const rows: any[] = [];
+  employees.forEach((e, ei) => {
+    // Полосы по сотрудникам — чтобы строки разных людей не путались
+    const bg = ei % 2 ? '#F4F6F9' : '#FFFFFF';
+    const cell = (value: unknown, extra: Record<string, unknown> = {}) => ({ value: value ?? undefined, backgroundColor: bg, ...extra });
+    for (let p = 0; p < TEMPLATE_PERIODS; p++) {
+      const n = rows.length + 2; // номер строки в Excel (1 — заголовок)
+      rows.push([
+        cell(e.name, p ? { textColor: '#6B7682' } : { fontWeight: 'bold' }),
+        cell(e.id, { type: Number }),
+        cell(teamOf(e) || null),
+        cell('Отпуск'),
+        cell(null, { type: Date, format: DATE }),
+        cell(null, { type: Number }),
+        // Формула в XLSX хранится без «=» (так её пишет и сам Excel)
+        { type: 'Formula', value: `IF(AND(E${n}<>"",F${n}<>""),E${n}+F${n}-1,"")`, format: DATE, backgroundColor: '#EEF7F0', textColor: '#2E7D46' },
+        cell(null),
+      ]);
+    }
+  });
   await writeExcelFile([
     {
-      data: [head, ...rows] as any,
+      data: [head, ...rows],
       sheet: 'Отсутствия',
-      columns: [{ width: 34 }, { width: 15 }, { width: 22 }, { width: 13 }, { width: 13 }, { width: 13 }, { width: 16 }, { width: 36 }],
+      columns: [{ width: 34 }, { width: 14 }, { width: 22 }, { width: 12 }, { width: 13 }, { width: 8 }, { width: 13 }, { width: 36 }],
       stickyRowsCount: 1,
     },
-    { data: INSTRUCTION.map((l, i) => [i === 0 ? { value: l, fontWeight: 'bold' as const } : l]) as any, sheet: 'Как заполнить', columns: [{ width: 110 }] },
-  ]).toFile(`отсутствия-шаблон.xlsx`);
+    { data: INSTRUCTION.map((l, i) => [i === 0 ? { value: l, fontWeight: 'bold' as const } : l]) as any, sheet: 'Как заполнить', columns: [{ width: 120 }] },
+  ]).toFile('отсутствия-шаблон.xlsx');
 }
 
-/** Шаблон CSV для Excel (разделитель «;», BOM — чтобы Excel понял UTF-8) */
+/** Шаблон CSV для Excel (разделитель «;», BOM — чтобы Excel понял UTF-8). Окончание посчитается при загрузке. */
 export function downloadTemplateCsv(employees: Employee[]) {
   const esc = (v: unknown) => {
     const s = String(v ?? '');
     return /[;"\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const lines = [TEMPLATE_HEADER, ...employees.map((e) => [e.name, e.id, teamOf(e), 'Отпуск', '', '', '', ''])].map((r) => r.map(esc).join(';'));
+  const rows = employees.flatMap((e) => Array.from({ length: TEMPLATE_PERIODS }, () => [e.name, e.id, teamOf(e), 'Отпуск', '', '', '', '']));
+  const lines = [TEMPLATE_HEADER, ...rows].map((r) => r.map(esc).join(';'));
   const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);

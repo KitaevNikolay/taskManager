@@ -167,7 +167,7 @@ export function AbsenceImport({ onClose, onDone, onImpact }: { onClose: () => vo
             >
               <div>
                 <b>{fileName || 'Перетащите файл сюда'}</b>
-                <div className="muted small">XLSX, CSV или JSON. Колонки: сотрудник (ФИО или ID в Битрикс24), тип, дата начала, дата окончания или количество дней, комментарий.</div>
+                <div className="muted small">XLSX, CSV или JSON. Колонки: сотрудник (ФИО или ID в Битрикс24), тип, дата начала, количество дней (окончание посчитается само), комментарий.</div>
               </div>
               <label className="btn">
                 Выбрать файл
@@ -175,7 +175,7 @@ export function AbsenceImport({ onClose, onDone, onImpact }: { onClose: () => vo
               </label>
             </div>
             <div className="row wrap small">
-              <span className="muted">Шаблон со всеми вашими сотрудниками — останется вписать даты:</span>
+              <span className="muted">Шаблон: у каждого сотрудника строки под периоды отпуска — впишите начало и количество дней, окончание посчитается формулой:</span>
               <TemplateButtons />
             </div>
 
