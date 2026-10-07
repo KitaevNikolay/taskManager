@@ -157,7 +157,7 @@ async function sendResetEmail(user: any) {
   await transport!.sendMail({
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: user.email,
-    subject: 'Восстановление пароля — Задачи отдела',
+    subject: 'Восстановление пароля — Стасик',
     text: `Здравствуйте${user.name ? ', ' + user.name : ''}!\n\nДля входа под логином «${user.login}» задайте новый пароль по ссылке (действует ${RESET_MINUTES} минут):\n${link}\n\nЕсли вы не запрашивали восстановление, просто проигнорируйте письмо.`,
     html: `<p>Здравствуйте${user.name ? ', ' + escapeHtml(user.name) : ''}!</p>
 <p>Для входа под логином «<b>${escapeHtml(user.login)}</b>» задайте новый пароль (ссылка действует ${RESET_MINUTES} минут):</p>

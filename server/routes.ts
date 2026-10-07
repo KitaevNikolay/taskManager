@@ -65,7 +65,9 @@ api.get('/employees', (req, res) => {
       `SELECT e.*,
          (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7)) AS open_count,
          (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7) AND t.deadline IS NOT NULL AND t.deadline < ?) AS overdue_count,
-         (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7) AND ${inWorkSql()}) AS in_progress_count
+         (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = e.id AND t.status NOT IN (5,7) AND ${inWorkSql()}) AS in_progress_count,
+         (SELECT COUNT(*) FROM note_links l JOIN notes n ON n.id = l.note_id JOIN note_tabs nt ON nt.id = n.tab_id
+            WHERE l.kind = 'employee' AND l.target_id = e.id AND nt.user_id = e.user_id) AS notes_count
        FROM employees e WHERE e.user_id = ? ORDER BY e.sort_order, e.name`,
       now, u,
     ).map((e) => ({ ...e, dayoff: dayoffStats(u, e.id), ...absenceInfo(u, e.id) })),
@@ -175,7 +177,9 @@ const taskCols = () => `t.*,
   (SELECT position FROM queue qu WHERE qu.task_id = t.id AND qu.employee_id = t.responsible_id AND qu.user_id = :u) AS queue_pos,
   (SELECT 1 FROM employees e WHERE e.id = t.responsible_id AND e.user_id = :u) AS is_employee,
   (SELECT mode FROM task_notify n WHERE n.task_id = t.id AND n.user_id = :u) AS notify,
-  (SELECT d.id FROM departments d WHERE d.group_id = t.group_id AND d.user_id = :u) AS department_id`;
+  (SELECT d.id FROM departments d WHERE d.group_id = t.group_id AND d.user_id = :u) AS department_id,
+  (SELECT COUNT(*) FROM note_links l JOIN notes nn ON nn.id = l.note_id JOIN note_tabs nt ON nt.id = nn.tab_id
+     WHERE l.kind = 'task' AND l.target_id = t.id AND nt.user_id = :u) AS notes_count`;
 
 /** Запрос задач пользователя: :u подставляется числом (ID берётся из сессии, не из запроса) */
 function selectTasks(userId: number, where: string, ...params: unknown[]) {

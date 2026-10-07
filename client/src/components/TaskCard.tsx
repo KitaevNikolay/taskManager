@@ -94,6 +94,7 @@ export function TaskCard({ task, showResponsible = true, showStage, showDepartme
           <span className="chip muted" title="Сколько дней задача на текущем ответственном">{onEmp} дн.</span>
         )}
         {task.depends_on.length > 0 && <span className="chip muted" title="Есть предшественники">⛓ {task.depends_on.length}</span>}
+        {!!task.notes_count && <span className="chip muted" title={`Заметок, где упомянута задача: ${task.notes_count}`}>📝 {task.notes_count}</span>}
         {extra}
       </div>
     </div>

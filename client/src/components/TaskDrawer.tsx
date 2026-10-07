@@ -182,6 +182,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: number; onClose: () =>
                 )}
               </section>
 
+              <TaskNotes taskId={task.id} title={task.title} onClose={onClose} />
+
               {task.description && (
                 <section>
                   <h3>Описание</h3>
@@ -221,5 +223,36 @@ function DateInput({ value, onChange, disabled }: { value: string | null; onChan
       <input type="date" value={v} disabled={disabled} onChange={(e) => setV(e.target.value)} onBlur={() => v !== toYmd(value) && onChange(v)} />
       {value && <button className="btn ghost xs" disabled={disabled} title="Очистить" onClick={() => onChange('')}>✕</button>}
     </span>
+  );
+}
+
+interface NoteRef { id: number; title: string | null; content_text: string; tab_title: string; updated_at: string; done: boolean }
+
+/** Заметки, где упомянута задача, и быстрое создание новой */
+function TaskNotes({ taskId, title, onClose }: { taskId: number; title: string; onClose: () => void }) {
+  const { version } = useApp();
+  const [notes, setNotes] = useState<NoteRef[] | null>(null);
+  useEffect(() => {
+    api.get<NoteRef[]>(`/notes?link=task:${taskId}`).then(setNotes).catch(() => setNotes([]));
+  }, [taskId, version]);
+  const go = (hash: string) => {
+    location.hash = hash;
+    onClose();
+  };
+  const label = (n: NoteRef) => n.title || n.content_text.split('\n').map((s) => s.trim()).find(Boolean)?.slice(0, 80) || `Заметка ${n.id}`;
+  return (
+    <section>
+      <div className="row between">
+        <h3>Заметки {notes && notes.length > 0 && <span className="muted">({notes.length})</span>}</h3>
+        <button className="btn ghost sm" onClick={() => go(`#/notes?new=task:${taskId}&label=${encodeURIComponent(title)}`)}>+ Заметка</button>
+      </div>
+      {notes && notes.length === 0 && <div className="muted small">Упомяните задачу в заметке через # — она появится здесь</div>}
+      {notes?.map((n) => (
+        <div key={n.id} className={`dep-row ${n.done ? 'muted' : ''}`}>
+          <button className="link" onClick={() => go(`#/notes?note=${n.id}`)}>{label(n)}</button>
+          <span className="muted small">{n.tab_title} · {relTime(n.updated_at)}</span>
+        </div>
+      ))}
+    </section>
   );
 }

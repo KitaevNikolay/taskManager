@@ -221,6 +221,7 @@ if (!cols('tasks').includes('tags')) {
 
 // ---------- Переход на нескольких пользователей ----------
 // Данные однопользовательской версии получают user_id = 0 («ничьи»), затем их забирает первый пользователь.
+const q0 = (sql: string) => db.prepare(sql).get();
 const addCol = (table: string, ddl: string, name: string) => {
   if (!cols(table).includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 };
@@ -271,6 +272,36 @@ if (!cols('users').includes('role')) {
 addCol('users', "theme TEXT NOT NULL DEFAULT 'auto'", 'theme');
 addCol('users', 'settings TEXT', 'settings');
 addCol('users', 'notify TEXT', 'notify');
+addCol('notes', 'daily_on TEXT', 'daily_on'); // заметка дня: YYYY-MM-DD
+
+// Связи заметок: упоминания задач (#), сотрудников (@) и других заметок ([[) — пересобираются при сохранении
+db.exec(`CREATE TABLE IF NOT EXISTS note_links (
+  note_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,                      -- task | employee | note
+  target_id INTEGER NOT NULL,
+  label TEXT,                              -- подпись на момент упоминания
+  PRIMARY KEY (note_id, kind, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(kind, target_id);`);
+
+// Полнотекстовый поиск по заметкам: unicode61 приводит кириллицу к одному регистру (LOWER в SQLite так не умеет)
+{
+  const hadFts = !!q0("SELECT 1 FROM sqlite_master WHERE name = 'notes_fts'");
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(title, content_text, content='notes', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+    CREATE TRIGGER IF NOT EXISTS notes_fts_ai AFTER INSERT ON notes BEGIN
+      INSERT INTO notes_fts(rowid, title, content_text) VALUES (new.id, new.title, new.content_text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS notes_fts_ad AFTER DELETE ON notes BEGIN
+      INSERT INTO notes_fts(notes_fts, rowid, title, content_text) VALUES ('delete', old.id, old.title, old.content_text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS notes_fts_au AFTER UPDATE OF title, content_text ON notes BEGIN
+      INSERT INTO notes_fts(notes_fts, rowid, title, content_text) VALUES ('delete', old.id, old.title, old.content_text);
+      INSERT INTO notes_fts(rowid, title, content_text) VALUES (new.id, new.title, new.content_text);
+    END;`);
+  if (!hadFts) db.exec("INSERT INTO notes_fts(notes_fts) VALUES ('rebuild')");
+}
+
 db.exec('CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id, read_at)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_absences_user ON absences(user_id, employee_id, date_from)');
 

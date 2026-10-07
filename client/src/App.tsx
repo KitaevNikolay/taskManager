@@ -178,7 +178,7 @@ function Shell({ user }: { user: User }) {
 
   // Число непрочитанных алертов во вкладке браузера
   useEffect(() => {
-    document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) Задачи отдела` : 'Задачи отдела';
+    document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) Стасик` : 'Стасик';
   }, [unread]);
 
   const ctx = useMemo<Ctx>(
@@ -191,7 +191,10 @@ function Shell({ user }: { user: User }) {
     <AppCtx.Provider value={ctx}>
       <div className="shell">
         <header className="topbar">
-          <div className="brand">Задачи отдела</div>
+          <a className="brand" href="#/kanban" title="На канбан">
+            <img src="/favicon.svg" alt="" width={28} height={28} />
+            <span>Стасик</span>
+          </a>
           <nav>
             {PAGES.map((p) => (
               <a key={p.id} href={`#/${p.id}`} className={route === p.id || (!PAGES.some((x) => x.id === route) && p.id === 'kanban') ? 'active' : ''}>

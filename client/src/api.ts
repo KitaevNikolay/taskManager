@@ -14,6 +14,7 @@ export interface Employee {
   open_count?: number;
   overdue_count?: number;
   in_progress_count?: number;
+  notes_count?: number;
 }
 
 export type AbsenceType = 'vacation' | 'dayoff' | 'sick';
@@ -73,6 +74,8 @@ export interface Task {
   notify: 'on' | 'off' | null;
   /** Отдел пользователя, в группе которого задача (если есть) */
   department_id: number | null;
+  /** Сколько заметок пользователя упоминают задачу */
+  notes_count?: number;
 }
 
 export interface Alert {

@@ -59,7 +59,7 @@ export function LoginScreen({ status, onDone }: { status: AuthStatus; onDone: ()
   }
 
   return (
-    <AuthCard title={mode === 'login' ? 'Задачи отдела' : 'Восстановление пароля'} onSubmit={submit}>
+    <AuthCard title={mode === 'login' ? 'Стасик' : 'Восстановление пароля'} onSubmit={submit}>
       <label className="field">
         <span>{mode === 'login' ? 'Логин' : 'Логин или почта'}</span>
         <input autoFocus autoComplete="username" value={login} onChange={(e) => setLogin(e.target.value)} required />

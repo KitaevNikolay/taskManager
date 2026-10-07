@@ -135,7 +135,7 @@ export function EmployeesPage() {
               )}
               {employees.map((e) => (
                 <tr key={e.id}>
-                  <td><span className="who"><Avatar name={e.name} icon={e.photo} size={26} /> {e.name}{!!e.is_buffer && <span className="chip warn buffer-chip">буфер</span>}<AbsenceBadge employee={e} /></span></td>
+                  <td><span className="who"><Avatar name={e.name} icon={e.photo} size={26} /> {e.name}{!!e.is_buffer && <span className="chip warn buffer-chip">буфер</span>}<AbsenceBadge employee={e} />{!!e.notes_count && <a className="chip muted" href={`#/notes?link=employee:${e.id}`} title="Заметки, где упомянут сотрудник">📝 {e.notes_count}</a>}</span></td>
                   <td className="muted">{e.id}</td>
                   <td>{e.department || <span className="muted">—</span>}</td>
                   <td>{e.position || <span className="muted">—</span>}</td>

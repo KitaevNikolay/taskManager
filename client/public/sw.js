@@ -7,10 +7,10 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {};
   } catch {
-    data = { title: 'Задачи отдела', body: event.data ? event.data.text() : '' };
+    data = { title: 'Стасик', body: event.data ? event.data.text() : '' };
   }
   event.waitUntil(
-    self.registration.showNotification(data.title || 'Задачи отдела', {
+    self.registration.showNotification(data.title || 'Стасик', {
       body: data.body || '',
       tag: data.tag,
       icon: '/favicon.svg',

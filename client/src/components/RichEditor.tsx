@@ -5,10 +5,11 @@ import { Placeholder } from '@tiptap/extensions';
 import { TaskItem, TaskList } from '@tiptap/extension-list';
 import Highlight from '@tiptap/extension-highlight';
 import DOMPurify from 'dompurify';
+import { mentionExtension, type MentionCtx } from './mentions';
 
 /** Безопасный HTML заметки для показа (ссылки — в новой вкладке) */
 export function safeHtml(html: string) {
-  const clean = DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'data-type', 'data-checked'] });
+  const clean = DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'data-type', 'data-checked', 'data-id', 'data-label', 'data-mention-suggestion-char'] });
   return clean.replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ');
 }
 
@@ -17,12 +18,16 @@ interface Props {
   onChange: (html: string, text: string) => void;
   placeholder?: string;
   autoFocus?: boolean;
+  /** Упоминания: # задача, @ сотрудник, [[ заметка */
+  mentions?: MentionCtx;
 }
 
-export function RichEditor({ value, onChange, placeholder, autoFocus }: Props) {
+export function RichEditor({ value, onChange, placeholder, autoFocus, mentions }: Props) {
   // useEditor запоминает обработчики при создании — берём актуальный onChange через ref
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const mentionsRef = useRef<MentionCtx>(mentions || {});
+  mentionsRef.current = mentions || {};
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -32,7 +37,8 @@ export function RichEditor({ value, onChange, placeholder, autoFocus }: Props) {
       Highlight,
       TaskList,
       TaskItem.configure({ nested: true }),
-      Placeholder.configure({ placeholder: placeholder || 'Текст заметки…' }),
+      Placeholder.configure({ placeholder: placeholder || 'Текст заметки… # задача, @ сотрудник, [[ заметка' }),
+      mentionExtension(mentionsRef),
     ],
     content: value,
     autofocus: autoFocus ? 'end' : false,
