@@ -80,7 +80,7 @@ export function EmployeesPage() {
   };
 
   return (
-    <div className="page">
+    <div className="page page-wide">
       <div className="page-head">
         <h1>Сотрудники</h1>
         <span className="muted">{employees.length} чел. · порядок меняется перетаскиванием колонок в «Очередях»</span>
