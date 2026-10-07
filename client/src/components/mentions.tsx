@@ -74,7 +74,8 @@ function suggestion(kind: MentionKind, ctx: RefObject<MentionCtx>): Omit<Suggest
       let unmount: (() => void) | null = null;
       return {
         onStart: (p) => {
-          comp = new ReactRenderer(MentionList, { props: { ...p, kind }, editor: p.editor });
+          // Позиционируется обёртка рендерера — ей и нужен z-index, иначе список уходит под окно заметки
+          comp = new ReactRenderer(MentionList, { props: { ...p, kind }, editor: p.editor, className: 'mention-pop-layer' });
           unmount = p.mount(comp.element as HTMLElement);
         },
         onUpdate: (p) => comp?.updateProps({ ...p, kind }),
